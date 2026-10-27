@@ -1,4 +1,5 @@
 node_modules/
+frontend/node_modules/
 .env
 cache/
 artifacts/
@@ -6,4 +7,5 @@ coverage/
 typechain-types/
 dist/
 build/
+frontend/dist/
 .DS_Store
