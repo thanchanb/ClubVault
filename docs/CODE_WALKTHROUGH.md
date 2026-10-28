@@ -69,7 +69,7 @@ ClubVault introduces a two-stage disbursement model:
   4. Never logs or prints private keys. Prints a clear `PASS` / `FAIL` summary.
 
 ### `.gitignore` and `.env.example`
-- **What it does:** Guarantees zero secret leakage.
+- **What it does:** Prevents accidental secret leakage by strictly excluding local configuration files from version control.
 - **How it works:** `.gitignore` explicitly excludes `.env`, `node_modules`, `cache`, `artifacts`, and build outputs. `.env.example` provides clean, empty template keys for other developers and judges.
 
 ---
@@ -77,7 +77,7 @@ ClubVault introduces a two-stage disbursement model:
 ## 4. Key Questions Judges Might Ask About Phase 0
 
 1. **"Why did you choose `evmVersion: 'paris'` instead of the default Shanghai or Cancun?"**
-   *Answer:* "We chose Paris as a conservative, battle-tested EVM target. While MST Testnet supports Shanghai opcodes like PUSH0, setting Paris guarantees complete forward and backward compatibility across all node clients and block explorers without risk of deployment reverts."
+   *Answer:* "We chose Paris as a conservative, battle-tested EVM target. While MST Testnet supports Shanghai opcodes like PUSH0, setting Paris provides broad forward and backward compatibility across standard EVM clients without risk of deployment reverts."
 
 2. **"How do you ensure you never deploy to Mainnet accidentally?"**
    *Answer:* "Our Hardhat config separates `mstTestnet` and `mstMainnet` by distinct chain IDs. Our `preflight.ts` script checks `eth_chainId` against expected constants before any action, and our deployment process requires an explicit, separate flag."

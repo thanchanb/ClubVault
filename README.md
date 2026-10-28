@@ -44,7 +44,7 @@ In traditional treasury multisigs, reaching an approval threshold immediately re
 ## 🛠️ Technology Stack
 
 - **Smart Contracts:** Solidity `^0.8.20`, OpenZeppelin Contracts v5 (`ReentrancyGuard`), Hardhat TypeScript.
-- **EVM Target:** `evmVersion: "paris"` (conservative target guaranteeing universal compatibility across all node clients).
+- **EVM Target:** `evmVersion: "paris"` (conservative target providing broad compatibility across node clients).
 - **Frontend dApp:** React 18, Vite, TypeScript, Ethers v6, custom vanilla CSS design system.
 - **Wallet Support:** BridgeKey (official MST wallet) and MetaMask / EIP-1193 wallets.
 

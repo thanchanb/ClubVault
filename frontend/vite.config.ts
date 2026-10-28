@@ -7,4 +7,16 @@ export default defineConfig({
     port: 3000,
     open: false,
   },
+  build: {
+    chunkSizeWarningLimit: 800,
+    rollupOptions: {
+      output: {
+        manualChunks: {
+          vendor: ["react", "react-dom"],
+          ethers: ["ethers"],
+          motion: ["framer-motion", "lucide-react"],
+        },
+      },
+    },
+  },
 });
