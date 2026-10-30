@@ -1,17 +1,42 @@
-import React, { useState, useEffect, useMemo } from "react";
+import React, { useState, useEffect, useMemo, useRef } from "react";
 import { ethers } from "ethers";
 import {
   ClubVaultABI,
   VaultFactoryABI,
   MST_TESTNET_CONFIG,
+  MST_MAINNET_CONFIG,
   CONTRACT_ADDRESSES,
+  getMstRpcProvider,
 } from "./contracts/config";
+import {
+  getBridgeKeyProvider,
+  getBrowserSigner,
+  switchOrAddMSTTestnet,
+  switchOrAddMSTMainnet,
+  parseWalletError,
+  waitForInjectedProvider,
+  queryActiveWalletAccount,
+  connectRealBridgeKey,
+  fetchWalletBalance,
+} from "./utils/wallet";
 import { Navbar } from "./components/Navbar";
 import { VaultHeroExperience } from "./components/VaultHeroExperience";
 import { HowItWorksSection } from "./components/HowItWorksSection";
 import { ProposalDetailModal } from "./components/ProposalDetailModal";
 import { PaymentConfirmationModal } from "./components/PaymentConfirmationModal";
+import { ExecutionConfirmationModal } from "./components/ExecutionConfirmationModal";
 import { ReceiptUploadModal } from "./components/ReceiptUploadModal";
+import { TemplateSelectorModal, TEMPLATES } from "./components/TemplateSelectorModal";
+import { BridgeKeyModal } from "./components/BridgeKeyModal";
+import { GaslessVoteModal } from "./components/GaslessVoteModal";
+import { MainnetDeploymentModal } from "./components/MainnetDeploymentModal";
+import { ActionInbox } from "./components/ActionInbox";
+import { PublicFooter } from "./components/PublicFooter";
+import { PricingView } from "./views/PricingView";
+import { DocsView } from "./views/DocsView";
+import { SecurityView } from "./views/SecurityView";
+import { FAQView } from "./views/FAQView";
+import { ContactView } from "./views/ContactView";
 import {
   ShieldCheck,
   Users,
@@ -20,6 +45,7 @@ import {
   Unlock,
   AlertTriangle,
   ArrowRight,
+  ArrowDownLeft,
   ExternalLink,
   Plus,
   CheckCircle2,
@@ -31,6 +57,18 @@ import {
   Filter,
   Eye,
   Zap,
+  Download,
+  LayoutDashboard,
+  GraduationCap,
+  Building,
+  Compass,
+  Trophy,
+  HeartHandshake,
+  Settings,
+  RefreshCw,
+  Loader2,
+  X,
+  Fuel,
 } from "lucide-react";
 
 // Types matching smart contract enums
@@ -83,25 +121,66 @@ export interface TransactionRecord {
   status: "CONFIRMED" | "PENDING";
 }
 
-export const App: React.FC = () => {
-  // Wallet State
-  const [account, setAccount] = useState<string | null>(null);
-  const [accountBalance, setAccountBalance] = useState<string>("0");
-  const [networkName, setNetworkName] = useState<string>("MST Testnet (91562037)");
-  const [isCorrectNetwork, setIsCorrectNetwork] = useState<boolean>(true);
+export type WalletConnectionStatus =
+  | "DISCONNECTED"
+  | "CONNECTING"
+  | "CONNECTED"
+  | "WRONG_NETWORK"
+  | "ERROR";
 
-  // Vault State
-  const [vaultAddress, setVaultAddress] = useState<string>(CONTRACT_ADDRESSES.GenesisVault);
+export const App: React.FC = () => {
+  // Authoritative Wallet Lifecycle State: starts strictly DISCONNECTED on boot and reload
+  const [walletStatus, setWalletStatus] = useState<WalletConnectionStatus>("DISCONNECTED");
+  const [account, setAccount] = useState<string | null>(null);
+  const [accountBalance, setAccountBalance] = useState<string>("0.00");
+  const [currentChainId, setCurrentChainId] = useState<number>(MST_MAINNET_CONFIG.chainId);
+  const [networkName, setNetworkName] = useState<string>("MST Mainnet (4646)");
+  const [isCorrectNetwork, setIsCorrectNetwork] = useState<boolean>(true);
+  const isConnectedByUserRef = useRef<boolean>(false);
+  const currencySymbol = currentChainId === MST_MAINNET_CONFIG.chainId ? "MSTC" : "tMSTC";
+
+  // Guarantee clean DISCONNECTED state on every boot, reload, and refresh
+  useEffect(() => {
+    isConnectedByUserRef.current = false;
+    setWalletStatus("DISCONNECTED");
+    setAccount(null);
+    setAccountBalance("0.00");
+    try {
+      localStorage.removeItem("clubvault_connected_account");
+      localStorage.removeItem("clubvault_connected_balance");
+      localStorage.removeItem("clubvault_preferred_wallet");
+      sessionStorage.removeItem("clubvault_connected_account");
+      sessionStorage.removeItem("clubvault_connected_balance");
+      sessionStorage.removeItem("clubvault_preferred_wallet");
+    } catch {}
+  }, []);
+
+  // Vault State: Default to the verified Genesis Vault on MST Mainnet (Chain ID 4646)
+  const [vaultAddress, setVaultAddress] = useState<string>(
+    CONTRACT_ADDRESSES.GenesisVaultV2 ||
+    CONTRACT_ADDRESSES.GenesisVault ||
+    "0x9a81aED1b3D2d4c85A0ea8FC6129D17b2fFed339"
+  );
   const [clubName, setClubName] = useState<string>("Web3 Builders Club");
   const [clubDescription, setClubDescription] = useState<string>(
-    "Decentralized treasury for hackathon expenses, developer bounties, and research grants"
+    "MST Mainnet Production Treasury Vault (2-of-2 Multisig)"
   );
   const [members, setMembers] = useState<string[]>([
     "0x06e08cf0aed1663834E267E90333164a0276bbbD",
-    "0x70997970C51812dc3A010C7d01b50e0d17dc79C8",
-    "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC",
+    "0xF09192ed618C49e9f9A439D97d798F8c600A38a8",
   ]);
   const [requiredApprovals, setRequiredApprovals] = useState<number>(2);
+
+  // On-Chain Contract Deployment & Transaction Stages
+  const [isContractDeployedOnChain, setIsContractDeployedOnChain] = useState<boolean>(false);
+  const [isSyncingContract, setIsSyncingContract] = useState<boolean>(false);
+  const isSyncingVaultRef = useRef<boolean>(false);
+  const [txStage, setTxStage] = useState<
+    "idle" | "requesting" | "signing" | "broadcasting" | "confirming" | "success" | "error"
+  >("idle");
+  const [txStageMessage, setTxStageMessage] = useState<string>("");
+  const [activeTxHash, setActiveTxHash] = useState<string | null>(null);
+  const [votingProposalId, setVotingProposalId] = useState<number | null>(null);
 
   // Treasury Metrics
   const [vaultBalance, setVaultBalance] = useState<string>("15.5");
@@ -172,14 +251,15 @@ export const App: React.FC = () => {
     },
   ]);
 
-  // Transaction History State
-  const [transactions, setTransactions] = useState<TransactionRecord[]>([
+  // Transaction History State: isolated between live on-chain verified records and demo simulation
+  const [liveTransactions, setLiveTransactions] = useState<TransactionRecord[]>([]);
+  const [demoTransactions, setDemoTransactions] = useState<TransactionRecord[]>([
     {
       id: "tx-1",
       type: "STANDARD_DISBURSEMENT",
       amount: "2.0 tMSTC",
       fromOrTo: "0x70997970C51812dc3A010C7d01b50e0d17dc79C8",
-      txHash: "0x10b9e8413d3b7fdbd21ca9047e6be58d7f0caf0cab0edbf1341bf4cf8ad94d55",
+      txHash: "DEMO-TX-0x10b9e8413d3b7fdbd21ca9047e6be58d7f0caf0cab0edbf1341bf4cf8ad94d55",
       timestamp: Math.floor(Date.now() / 1000) - 86400 * 2,
       status: "CONFIRMED",
     },
@@ -188,7 +268,7 @@ export const App: React.FC = () => {
       type: "ADVANCE_DISBURSEMENT",
       amount: "1.2 tMSTC",
       fromOrTo: "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC",
-      txHash: "0xecd5e088aef3c5e61cec68ca63c617c4008ef013ecd2b2a8d329b8b13ded28a6",
+      txHash: "DEMO-TX-0xecd5e088aef3c5e61cec68ca63c617c4008ef013ecd2b2a8d329b8b13ded28a6",
       timestamp: Math.floor(Date.now() / 1000) - 86400,
       status: "CONFIRMED",
     },
@@ -197,11 +277,16 @@ export const App: React.FC = () => {
       type: "DEPOSIT",
       amount: "10.0 tMSTC",
       fromOrTo: "0x06e08cf0aed1663834E267E90333164a0276bbbD",
-      txHash: "0x7c458a432924faef8602b667823e5e4fa4312678da4bca07e6be58d7f0c11223",
+      txHash: "DEMO-TX-0x7c458a432924faef8602b667823e5e4fa4312678da4bca07e6be58d7f0c11223",
       timestamp: Math.floor(Date.now() / 1000) - 86400 * 3,
       status: "CONFIRMED",
     },
   ]);
+  const [isSyncingTransactions, setIsSyncingTransactions] = useState<boolean>(false);
+  const [transactionsSyncError, setTransactionsSyncError] = useState<string | null>(null);
+
+  // Derived transactions list: in live mode, strictly only verified on-chain and live-session transactions
+  const displayedTransactions = isContractDeployedOnChain ? liveTransactions : demoTransactions;
 
   // UI Navigation & Modals
   const [activeTab, setActiveTab] = useState<"proposals" | "advances" | "members" | "deposit" | "transactions">("proposals");
@@ -209,7 +294,12 @@ export const App: React.FC = () => {
   const [showReceiptModal, setShowReceiptModal] = useState<boolean>(false);
   const [receiptTargetProposalId, setReceiptTargetProposalId] = useState<number | null>(null);
   const [selectedProposalForDetail, setSelectedProposalForDetail] = useState<ProposalData | null>(null);
+  const [executionConfirmProposal, setExecutionConfirmProposal] = useState<ProposalData | null>(null);
+  const [gaslessVoteProposal, setGaslessVoteProposal] = useState<ProposalData | null>(null);
+  const [isExtensionReloadRequired, setIsExtensionReloadRequired] = useState<boolean>(false);
   const [showFactoryModal, setShowFactoryModal] = useState<boolean>(false);
+  const [showBridgeKeyModal, setShowBridgeKeyModal] = useState<boolean>(false);
+  const [showMainnetModal, setShowMainnetModal] = useState<boolean>(false);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const [activeNavSection, setActiveNavSection] = useState<string>("overview");
 
@@ -271,8 +361,106 @@ export const App: React.FC = () => {
   const [formDescription, setFormDescription] = useState<string>("");
   const [formGraceDays, setFormGraceDays] = useState<number>(3);
   const [formDepositAmount, setFormDepositAmount] = useState<string>("");
+  const [depositInputError, setDepositInputError] = useState<string | null>(null);
 
-  // Factory Form
+  // Routing & Theme State
+  type RouteName = "home" | "pricing" | "docs" | "security" | "faq" | "contact";
+
+  const getRouteFromHash = (): RouteName => {
+    const hash = window.location.hash.toLowerCase();
+    if (hash.startsWith("#pricing")) return "pricing";
+    if (hash.startsWith("#docs")) return "docs";
+    if (hash.startsWith("#security")) return "security";
+    if (hash.startsWith("#faq")) return "faq";
+    if (hash.startsWith("#contact")) return "contact";
+    return "home";
+  };
+
+  const [currentRoute, setCurrentRoute] = useState<RouteName>(getRouteFromHash);
+  const [theme, setTheme] = useState<"light" | "dark">(() => {
+    const saved = localStorage.getItem("cv-theme");
+    return saved === "dark" || saved === "light" ? saved : "dark";
+  });
+
+  useEffect(() => {
+    document.documentElement.setAttribute("data-theme", theme);
+    localStorage.setItem("cv-theme", theme);
+  }, [theme]);
+
+  // Synchronize hash, active section scrolling, and tabs on hashchange / reload
+  useEffect(() => {
+    const syncRouteAndScroll = () => {
+      const hash = window.location.hash.toLowerCase();
+      if (hash.startsWith("#pricing")) {
+        setCurrentRoute("pricing");
+        window.scrollTo({ top: 0 });
+      } else if (hash.startsWith("#docs")) {
+        setCurrentRoute("docs");
+        window.scrollTo({ top: 0 });
+      } else if (hash.startsWith("#security")) {
+        setCurrentRoute("security");
+        window.scrollTo({ top: 0 });
+      } else if (hash.startsWith("#faq")) {
+        setCurrentRoute("faq");
+        window.scrollTo({ top: 0 });
+      } else if (hash.startsWith("#contact")) {
+        setCurrentRoute("contact");
+        window.scrollTo({ top: 0 });
+      } else {
+        setCurrentRoute("home");
+        if (hash.includes("proposals")) {
+          setActiveTab("proposals");
+          setTimeout(() => {
+            const el = document.getElementById("proposals");
+            if (el) el.scrollIntoView({ behavior: "smooth" });
+          }, 150);
+        } else if (hash.includes("transactions")) {
+          setActiveTab("transactions");
+          setTimeout(() => {
+            const el = document.getElementById("transactions");
+            if (el) el.scrollIntoView({ behavior: "smooth" });
+          }, 150);
+        } else if (hash.includes("app") || hash.includes("treasury")) {
+          setTimeout(() => {
+            const el = document.getElementById("treasury");
+            if (el) el.scrollIntoView({ behavior: "smooth" });
+          }, 150);
+        } else if (hash === "" || hash.includes("home") || hash.includes("overview")) {
+          window.scrollTo({ top: 0, behavior: "smooth" });
+        }
+      }
+    };
+
+    syncRouteAndScroll();
+    window.addEventListener("hashchange", syncRouteAndScroll);
+    return () => window.removeEventListener("hashchange", syncRouteAndScroll);
+  }, []);
+
+  const navigateToRoute = (route: string) => {
+    if (route === "home" || route === "overview") {
+      setCurrentRoute("home");
+      window.location.hash = "#home";
+      window.scrollTo({ top: 0, behavior: "smooth" });
+    } else if (route === "app" || route === "treasury") {
+      setCurrentRoute("home");
+      window.location.hash = "#treasury";
+      setTimeout(() => {
+        const el = document.getElementById("treasury");
+        if (el) el.scrollIntoView({ behavior: "smooth" });
+      }, 50);
+    } else {
+      const r = route as RouteName;
+      setCurrentRoute(r);
+      window.location.hash = `#${r}`;
+      window.scrollTo({ top: 0, behavior: "smooth" });
+    }
+  };
+
+  const toggleTheme = () => {
+    setTheme((prev) => (prev === "dark" ? "light" : "dark"));
+  };
+
+  // Factory Form (Defaults)
   const [factoryClubName, setFactoryClubName] = useState<string>("");
   const [factoryClubDesc, setFactoryClubDesc] = useState<string>("");
   const [factoryMembers, setFactoryMembers] = useState<string>("");
@@ -286,76 +474,557 @@ export const App: React.FC = () => {
     } else if (sectionId === "transactions") {
       setActiveTab("transactions");
     }
-    const el = document.getElementById(sectionId);
-    if (el) {
-      el.scrollIntoView({ behavior: "smooth" });
+
+    if (currentRoute !== "home") {
+      setCurrentRoute("home");
+      window.location.hash = sectionId === "overview" ? "#home" : `#${sectionId}`;
     }
+
+    setTimeout(() => {
+      const targetId = sectionId === "overview" ? "home" : sectionId;
+      const el = document.getElementById(targetId);
+      if (el) {
+        el.scrollIntoView({ behavior: "smooth" });
+      } else if (sectionId === "overview") {
+        window.scrollTo({ top: 0, behavior: "smooth" });
+      }
+    }, 60);
   };
 
-  // Connect Wallet
+  // Export Ledger to CSV (Section 14 Audit Trail)
+  const exportLedgerToCSV = () => {
+    const isLive = isContractDeployedOnChain;
+    const activeTxs = isLive ? liveTransactions : demoTransactions;
+    const activeProps = proposals;
+
+    const headers = [
+      "Date/Time (UTC)",
+      "Type",
+      "Amount",
+      "Counterparty / Recipient",
+      "Description",
+      "Status",
+      "Transaction Hash",
+      "Receipt Hash / CID",
+    ];
+
+    const metadataRows = [
+      `# ClubVault Treasury Audit Trail Ledger`,
+      `# Network: ${isLive ? "MST Testnet (Chain ID: 91562037)" : "Demo Simulation Mode"}`,
+      `# Vault Contract: ${vaultAddress}`,
+      `# Export Timestamp: ${new Date().toISOString()}`,
+      `# Verification Status: ${isLive ? "On-Chain Verified Records Only" : "Demo Simulation Only - Not Recorded On-Chain"}`,
+      `# Total Transactions: ${activeTxs.length}`,
+      `# Total Proposals: ${activeProps.length}`,
+    ];
+
+    const rows: string[][] = activeTxs.map((tx) => [
+      `"${new Date(tx.timestamp * 1000).toISOString()}"`,
+      `"${tx.type}"`,
+      `"${tx.amount}"`,
+      `"${tx.fromOrTo}"`,
+      `"Disbursement / Vault Activity"`,
+      `"${tx.status}"`,
+      `"${tx.txHash}"`,
+      `""`,
+    ]);
+
+    activeProps.forEach((p) => {
+      rows.push([
+        `"${new Date(p.createdAt * 1000).toISOString()}"`,
+        `"${p.proposalType === ProposalType.ADVANCE_PAYMENT ? "ADVANCE_PROPOSAL" : "STANDARD_PROPOSAL"}"`,
+        `"${p.amount} tMSTC"`,
+        `"${p.recipient}"`,
+        `"${p.description.replace(/"/g, '""')}"`,
+        `"${ProposalStatus[p.status]}"`,
+        `"${p.txHash || "PENDING"}"`,
+        `"${p.receiptHash || ""}"`,
+      ]);
+    });
+
+    const csvContent = [
+      ...metadataRows,
+      "",
+      headers.join(","),
+      ...rows.map((r) => r.join(",")),
+    ].join("\n");
+
+    const blob = new Blob([csvContent], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.setAttribute("href", url);
+    link.setAttribute("download", `ClubVault_${isLive ? "MST_Testnet" : "Demo"}_Ledger_${new Date().toISOString().slice(0, 10)}.csv`);
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+    setStatusMessage(
+      `Ledger CSV exported successfully (${rows.length} ${isLive ? "verified on-chain records" : "simulated records"}).`
+    );
+  };
+
+  // Directly connect genuine BridgeKey extension wallet (prompts real extension popup)
   const connectWallet = async () => {
-    if (typeof (window as any).ethereum === "undefined") {
-      // Live interactive simulation fallback
-      setStatusMessage("MetaMask not detected: interactive simulation mode active with sample signer.");
-      setAccount("0x06e08cf0aed1663834E267E90333164a0276bbbD");
-      setAccountBalance("14.85");
+    // Avoid multiple simultaneous connection requests
+    if (walletStatus === "CONNECTING") {
       return;
     }
 
-    try {
-      const provider = new ethers.BrowserProvider((window as any).ethereum);
-      const accounts = await provider.send("eth_requestAccounts", []);
-      if (accounts.length > 0) {
-        setAccount(accounts[0]);
-        const bal = await provider.getBalance(accounts[0]);
-        setAccountBalance(ethers.formatEther(bal).slice(0, 6));
+    setWalletStatus("CONNECTING");
 
-        const network = await provider.getNetwork();
-        if (Number(network.chainId) !== MST_TESTNET_CONFIG.chainId) {
-          setIsCorrectNetwork(false);
-          setIsLiveConnected(false);
-          await switchNetwork();
-        } else {
-          setIsCorrectNetwork(true);
-          setIsLiveConnected(true);
-        }
-        setStatusMessage(`Wallet connected: ${accounts[0].slice(0, 6)}...${accounts[0].slice(-4)}`);
+    try {
+      const provider = getBridgeKeyProvider() || (await waitForInjectedProvider(500));
+      if (!provider) {
+        setWalletStatus("ERROR");
+        setStatusMessage("BridgeKey wallet extension not detected. Please make sure BridgeKey is installed.");
+        setShowBridgeKeyModal(true);
+        return;
       }
+
+      // Directly prompt genuine BridgeKey extension popup (prompts user password & account unlock)
+      const res = await connectRealBridgeKey("bridgekey");
+
+      // Validate address with ethers.isAddress
+      if (!res.account || !ethers.isAddress(res.account)) {
+        throw new Error("Invalid Ethereum address returned from BridgeKey wallet.");
+      }
+
+      const checksumAccount = ethers.getAddress(res.account);
+
+      // Validate active chain ID: supports both MST Testnet (91562037) and MST Mainnet (4646)
+      const chainId = res.chainIdNum || (res.chainId ? parseInt(res.chainId, 16) : 0);
+      const isMst = chainId === MST_TESTNET_CONFIG.chainId || chainId === MST_MAINNET_CONFIG.chainId;
+
+      // IMMEDIATELY update UI state — zero delay, zero blocking on RPC
+      isConnectedByUserRef.current = true;
+      setAccount(checksumAccount);
+      setIsCorrectNetwork(isMst);
+      setIsLiveConnected(isMst);
+      setWalletStatus(isMst ? "CONNECTED" : "WRONG_NETWORK");
+      setShowBridgeKeyModal(false);
+
+      if (isMst) {
+        setCurrentChainId(chainId);
+        setNetworkName(chainId === MST_MAINNET_CONFIG.chainId ? "MST Mainnet (4646)" : "MST Testnet (91562037)");
+        setStatusMessage("Wallet Connected Successfully!");
+      } else {
+        setStatusMessage("Notice: Connected wallet is not on MST Network (Testnet 91562037 or Mainnet 4646).");
+      }
+
+      // Fetch live balance asynchronously in background without delaying UI
+      fetchWalletBalance(res.provider || provider, checksumAccount, chainId)
+        .then((b) => {
+          if (isConnectedByUserRef.current) {
+            setAccountBalance(b);
+          }
+        })
+        .catch(() => {});
     } catch (err: any) {
-      console.error("Wallet connection failed:", err);
-      setIsLiveConnected(false);
-      setStatusMessage(`Wallet notice: ${err.message || err}`);
+      console.warn("BridgeKey connect error:", err);
+      const parsed = parseWalletError(err);
+      if (parsed.isUserReject) {
+        // Required rejection behavior: keep disconnected, friendly cancellation message
+        isConnectedByUserRef.current = false;
+        setAccount(null);
+        setAccountBalance("0.00");
+        setWalletStatus("DISCONNECTED");
+        setIsLiveConnected(false);
+        setStatusMessage("Wallet connection was cancelled.");
+      } else if (parsed.isExtensionReload) {
+        setWalletStatus("ERROR");
+        setIsExtensionReloadRequired(true);
+      } else {
+        setWalletStatus("ERROR");
+        setStatusMessage(`BridgeKey Error: ${parsed.message}`);
+        setShowBridgeKeyModal(true);
+      }
+    } finally {
+      // Ensure state is never trapped in CONNECTING
+      setWalletStatus((prev) => (prev === "CONNECTING" ? "DISCONNECTED" : prev));
     }
+  };
+
+  // Handle BridgeKey Wallet Session Connection from Modal
+  const handleBridgeKeyConnect = (selectedAccount: string, balance: string) => {
+    if (!selectedAccount || !ethers.isAddress(selectedAccount)) {
+      setWalletStatus("ERROR");
+      setStatusMessage("Invalid account address returned from wallet.");
+      return;
+    }
+    const checksum = ethers.getAddress(selectedAccount);
+    isConnectedByUserRef.current = true;
+    setAccount(checksum);
+    setAccountBalance(balance);
+    if (!isCorrectNetwork) {
+      setWalletStatus("WRONG_NETWORK");
+      setIsLiveConnected(false);
+    } else {
+      setWalletStatus("CONNECTED");
+      setIsLiveConnected(true);
+      setStatusMessage("Wallet Connected Successfully!");
+    }
+    setShowBridgeKeyModal(false);
+  };
+
+  // Handle BridgeKey Disconnection
+  const handleBridgeKeyDisconnect = () => {
+    isConnectedByUserRef.current = false;
+    try {
+      localStorage.removeItem("clubvault_connected_account");
+      localStorage.removeItem("clubvault_connected_balance");
+      localStorage.removeItem("clubvault_preferred_wallet");
+      sessionStorage.removeItem("clubvault_connected_account");
+      sessionStorage.removeItem("clubvault_connected_balance");
+      sessionStorage.removeItem("clubvault_preferred_wallet");
+    } catch {}
+    setAccount(null);
+    setAccountBalance("0.00");
+    setWalletStatus("DISCONNECTED");
+    setIsCorrectNetwork(true);
+    setIsLiveConnected(false);
+    setShowBridgeKeyModal(false);
+    setStatusMessage("BridgeKey wallet session disconnected.");
+  };
+
+  // Listen to genuine BridgeKey/EVM extension events during active session
+  useEffect(() => {
+    let isMounted = true;
+    let activeProvider: any = null;
+
+    // Stable references for proper cleanup and duplicate event prevention
+    const handleAccountsChanged = (accounts: string[]) => {
+      if (!isMounted) return;
+      // Guard: Do not auto-connect on boot if user hasn't explicitly connected in this session
+      if (!isConnectedByUserRef.current) {
+        return;
+      }
+      if (!accounts || accounts.length === 0) {
+        handleBridgeKeyDisconnect();
+      } else {
+        const raw = accounts[0];
+        if (!ethers.isAddress(raw)) {
+          handleBridgeKeyDisconnect();
+          return;
+        }
+        const newAddr = ethers.getAddress(raw);
+        setAccount(newAddr);
+        setWalletStatus(isCorrectNetwork ? "CONNECTED" : "WRONG_NETWORK");
+        setStatusMessage(`Active account switched to ${newAddr.slice(0, 6)}...${newAddr.slice(-4)}`);
+
+        // Fetch balance asynchronously in background
+        if (activeProvider) {
+          fetchWalletBalance(activeProvider, newAddr, currentChainId)
+            .then((bal) => {
+              if (isMounted) setAccountBalance(bal);
+            })
+            .catch(() => {});
+        }
+      }
+    };
+
+    const handleChainChanged = (chainIdHex: string) => {
+      if (!isMounted) return;
+      if (!isConnectedByUserRef.current) return;
+      const chainIdNum = typeof chainIdHex === "string" ? parseInt(chainIdHex, 16) : Number(chainIdHex);
+      const isCorrect = chainIdNum === MST_TESTNET_CONFIG.chainId || chainIdNum === MST_MAINNET_CONFIG.chainId;
+      setIsCorrectNetwork(isCorrect);
+      setCurrentChainId(chainIdNum);
+      if (!isCorrect) {
+        setWalletStatus("WRONG_NETWORK");
+        setStatusMessage("Notice: Wallet network changed away from MST Network. Transactions are disabled.");
+      } else {
+        setWalletStatus("CONNECTED");
+        setNetworkName(chainIdNum === MST_MAINNET_CONFIG.chainId ? "MST Mainnet (4646)" : "MST Testnet (91562037)");
+        setStatusMessage(
+          chainIdNum === MST_MAINNET_CONFIG.chainId
+            ? "✔ Connected to MST Mainnet (Chain ID 4646)."
+            : "✔ Connected to MST Testnet (Chain ID 91562037)."
+        );
+      }
+    };
+
+    const initWalletListeners = async () => {
+      try {
+        const provider = getBridgeKeyProvider() || (window as any).ethereum || (await waitForInjectedProvider(1000));
+        if (!provider || !isMounted) return;
+        activeProvider = provider;
+
+        provider.on?.("accountsChanged", handleAccountsChanged);
+        provider.on?.("chainChanged", handleChainChanged);
+      } catch (err: any) {
+        console.warn("Wallet listener setup:", err);
+      }
+    };
+
+    initWalletListeners();
+
+    return () => {
+      isMounted = false;
+      if (activeProvider) {
+        activeProvider.removeListener?.("accountsChanged", handleAccountsChanged);
+        activeProvider.off?.("accountsChanged", handleAccountsChanged);
+        activeProvider.removeListener?.("chainChanged", handleChainChanged);
+        activeProvider.off?.("chainChanged", handleChainChanged);
+      }
+    };
+  }, []);
+
+  // Transaction Pre-Flight Safety Verification (Section 4)
+  const verifyTxPreflight = (targetVault: string, actionName: string): boolean => {
+    if (walletStatus !== "CONNECTED" || !account || !isConnectedByUserRef.current) {
+      setStatusMessage(`Cannot ${actionName}: Please connect your BridgeKey wallet first.`);
+      setShowBridgeKeyModal(true);
+      return false;
+    }
+    if (!ethers.isAddress(account)) {
+      setStatusMessage(`Cannot ${actionName}: Active wallet account is invalid.`);
+      return false;
+    }
+    if (!isCorrectNetwork) {
+      setStatusMessage(`Cannot ${actionName}: Wallet is not connected to MST Testnet (Chain ID 91562037).`);
+      return false;
+    }
+    if (!targetVault || !ethers.isAddress(targetVault)) {
+      setStatusMessage(`Cannot ${actionName}: Target vault contract address is invalid.`);
+      return false;
+    }
+    return true;
   };
 
   // Switch to MST Testnet
   const switchNetwork = async () => {
-    if (typeof (window as any).ethereum === "undefined") return;
-    try {
-      await (window as any).ethereum.request({
-        method: "wallet_switchEthereumChain",
-        params: [{ chainId: MST_TESTNET_CONFIG.chainIdHex }],
-      });
+    const success = await switchOrAddMSTTestnet();
+    if (success) {
       setIsCorrectNetwork(true);
       setIsLiveConnected(true);
-    } catch (switchError: any) {
-      if (switchError.code === 4902) {
-        try {
-          await (window as any).ethereum.request({
-            method: "wallet_addEthereumChain",
-            params: [MST_TESTNET_CONFIG],
-          });
-          setIsCorrectNetwork(true);
-          setIsLiveConnected(true);
-        } catch (addError) {
-          console.error("Failed to add MST Testnet:", addError);
-        }
-      }
+      setStatusMessage("✔ Switched network to MST Testnet.");
+    } else {
+      setStatusMessage("Could not switch to MST Testnet. Please approve in your BridgeKey wallet.");
     }
   };
 
+  // Switch to MST Mainnet
+  const switchToMainnet = async () => {
+    const success = await switchOrAddMSTMainnet();
+    if (success) {
+      setIsCorrectNetwork(true);
+      setIsLiveConnected(true);
+      setCurrentChainId(MST_MAINNET_CONFIG.chainId);
+      setNetworkName("MST Mainnet (4646)");
+      setStatusMessage("✔ Switched network to MST Mainnet.");
+    } else {
+      setStatusMessage("Could not switch to MST Mainnet. Please approve in your BridgeKey wallet.");
+    }
+  };
+
+  // Helper to obtain signer and contract from detected BridgeKey / EVM wallet
+  const getActiveContract = async (contractAddr: string, abi: any) => {
+    const browser = await getBrowserSigner();
+    if (!browser) return null;
+    return new ethers.Contract(contractAddr, abi, browser.signer);
+  };
+
+  // Synchronize on-chain state from MST contract
+  const syncOnChainVault = async (targetAddr?: string) => {
+    const addr = targetAddr || vaultAddress;
+    if (!addr || !ethers.isAddress(addr)) {
+      setIsContractDeployedOnChain(false);
+      return;
+    }
+
+    if (isSyncingVaultRef.current) return;
+    isSyncingVaultRef.current = true;
+
+    try {
+      setIsSyncingContract(true);
+      const rpc = getMstRpcProvider(currentChainId);
+      const code = await rpc.getCode(addr);
+
+      if (!code || code === "0x" || code.length <= 2) {
+        setIsContractDeployedOnChain(false);
+        setIsSyncingContract(false);
+        return;
+      }
+
+      setIsContractDeployedOnChain(true);
+      const vault = new ethers.Contract(addr, ClubVaultABI, rpc);
+
+      const [cName, cDesc, cMembers, cQuorum, cAvail, cRes, cUnconf, cCount, bal] =
+        await Promise.all([
+          vault.clubName(),
+          vault.clubDescription(),
+          vault.getMembers(),
+          vault.requiredApprovals(),
+          vault.availableFunds(),
+          vault.reservedFunds(),
+          vault.totalUnconfirmedAdvances(),
+          vault.proposalCount(),
+          rpc.getBalance(addr),
+        ]);
+
+      setClubName(cName);
+      setClubDescription(cDesc);
+      setMembers(cMembers);
+      setRequiredApprovals(Number(cQuorum));
+      setVaultBalance(ethers.formatEther(bal));
+      setAvailableFunds(ethers.formatEther(cAvail));
+      setReservedFunds(ethers.formatEther(cRes));
+      setUnconfirmedAdvances(ethers.formatEther(cUnconf));
+
+      const count = Number(cCount);
+      const loaded: ProposalData[] = [];
+      for (let i = 1; i <= count; i++) {
+        const p = await vault.getProposal(i);
+        loaded.push({
+          id: Number(p.id),
+          proposalType: Number(p.proposalType),
+          status: Number(p.status),
+          proposer: p.proposer,
+          recipient: p.recipient,
+          amount: ethers.formatEther(p.amount),
+          description: p.description,
+          approvalsCount: Number(p.approvalsCount),
+          rejectionsCount: Number(p.rejectionsCount),
+          createdAt: Number(p.createdAt),
+          executionDeadline: Number(p.executionDeadline),
+          receiptGracePeriod: Number(p.receiptGracePeriod),
+          receiptDeadline: Number(p.receiptDeadline),
+          receiptHash: p.receiptHash,
+          receiptDescription: p.receiptDescription,
+          receiptApprovals: Number(p.receiptApprovals),
+          receiptRejections: Number(p.receiptRejections),
+        });
+      }
+      // Always synchronize state: if count is 0, proposals list becomes empty to clear demo mock data
+      setProposals(loaded.reverse());
+
+      // Query on-chain event logs for verifiable transaction history
+      setIsSyncingTransactions(true);
+      setTransactionsSyncError(null);
+      try {
+        const depFilter = vault.filters.FundsDeposited();
+        const disbFilter = vault.filters.FundsDisbursed();
+        const repFilter = vault.filters.AdvanceRepaid();
+
+        const currSymbol = currentChainId === 4646 ? "MSTC" : "tMSTC";
+        // Genesis deployment block per chain (MST Mainnet: 21785565, MST Testnet: 6671400)
+        const fromBlock = currentChainId === 4646 ? 21785565 : 6671400;
+        const [depLogs, disbLogs, repLogs] = await Promise.all([
+          vault.queryFilter(depFilter, fromBlock, "latest"),
+          vault.queryFilter(disbFilter, fromBlock, "latest"),
+          vault.queryFilter(repFilter, fromBlock, "latest"),
+        ]);
+
+        const blockCache: Record<number, number> = {};
+        const getBlockTimestamp = async (bNum: number) => {
+          if (blockCache[bNum]) return blockCache[bNum];
+          return Math.floor(Date.now() / 1000);
+        };
+
+        const onChainTxs: TransactionRecord[] = [];
+
+        for (const log of depLogs) {
+          try {
+            const parsed = vault.interface.parseLog(log);
+            if (parsed) {
+              const ts = await getBlockTimestamp(log.blockNumber);
+              onChainTxs.push({
+                id: `onchain-dep-${log.transactionHash}-${log.index}`,
+                type: "DEPOSIT",
+                amount: `${ethers.formatEther(parsed.args[1])} ${currSymbol}`,
+                fromOrTo: parsed.args[0],
+                txHash: log.transactionHash,
+                timestamp: ts,
+                status: "CONFIRMED",
+              });
+            }
+          } catch {}
+        }
+
+        for (const log of disbLogs) {
+          try {
+            const parsed = vault.interface.parseLog(log);
+            if (parsed) {
+              const ts = await getBlockTimestamp(log.blockNumber);
+              const pType = Number(parsed.args[3]);
+              onChainTxs.push({
+                id: `onchain-disb-${log.transactionHash}-${log.index}`,
+                type: pType === ProposalType.STANDARD_PAYMENT ? "STANDARD_DISBURSEMENT" : "ADVANCE_DISBURSEMENT",
+                amount: `${ethers.formatEther(parsed.args[2])} ${currSymbol}`,
+                fromOrTo: parsed.args[1],
+                txHash: log.transactionHash,
+                timestamp: ts,
+                status: "CONFIRMED",
+              });
+            }
+          } catch {}
+        }
+
+        for (const log of repLogs) {
+          try {
+            const parsed = vault.interface.parseLog(log);
+            if (parsed) {
+              const ts = await getBlockTimestamp(log.blockNumber);
+              onChainTxs.push({
+                id: `onchain-rep-${log.transactionHash}-${log.index}`,
+                type: "REPAYMENT",
+                amount: `${ethers.formatEther(parsed.args[2])} ${currSymbol}`,
+                fromOrTo: parsed.args[1],
+                txHash: log.transactionHash,
+                timestamp: ts,
+                status: "CONFIRMED",
+              });
+            }
+          } catch {}
+        }
+
+        // Merge with session liveTransactions (avoiding duplicate transaction hashes)
+        setLiveTransactions((prevSessionTxs) => {
+          const merged = [...onChainTxs];
+          const seenHashes = new Set(onChainTxs.map((x) => x.txHash.toLowerCase()));
+          for (const stx of prevSessionTxs) {
+            if (stx.txHash && !seenHashes.has(stx.txHash.toLowerCase())) {
+              merged.push(stx);
+              seenHashes.add(stx.txHash.toLowerCase());
+            }
+          }
+          return merged.sort((a, b) => b.timestamp - a.timestamp);
+        });
+      } catch (eventErr: any) {
+        console.warn("Could not query on-chain transaction events:", eventErr);
+        setTransactionsSyncError(eventErr?.shortMessage || eventErr?.message || "Failed to query on-chain events via RPC");
+      } finally {
+        setIsSyncingTransactions(false);
+      }
+    } catch (err) {
+      console.warn("Could not query on-chain contract:", err);
+      setIsContractDeployedOnChain(false);
+      setIsSyncingTransactions(false);
+    } finally {
+      isSyncingVaultRef.current = false;
+      setIsSyncingContract(false);
+    }
+  };
+
+  // Auto-dismiss transient status notifications after 4.5 seconds
+  useEffect(() => {
+    if (!statusMessage) return;
+    const timer = setTimeout(() => {
+      setStatusMessage(null);
+    }, 4500);
+    return () => clearTimeout(timer);
+  }, [statusMessage]);
+
+  useEffect(() => {
+    syncOnChainVault();
+    const interval = setInterval(() => {
+      syncOnChainVault();
+    }, 25000);
+    return () => clearInterval(interval);
+  }, [vaultAddress]);
+
   // Create Proposal Action
-  const handleCreateProposal = (e: React.FormEvent) => {
+  const handleCreateProposal = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!formRecipient || !formAmount || !formDescription) {
       alert("Please fill all required fields.");
@@ -370,12 +1039,68 @@ export const App: React.FC = () => {
       return;
     }
 
+    if (isContractDeployedOnChain && account) {
+      if (!verifyTxPreflight(vaultAddress, "create proposal")) {
+        return;
+      }
+      try {
+        setTxStage("requesting");
+        setTxStageMessage("1/5: Requesting proposal creation transaction in wallet...");
+        const vault = await getActiveContract(vaultAddress, ClubVaultABI);
+        if (!vault) throw new Error("BridgeKey wallet provider not available.");
+
+        setTxStage("signing");
+        setTxStageMessage("2/5: Awaiting wallet signature to create proposal...");
+        const execSecs = 7 * 86400;
+        const graceSecs = formPropType === ProposalType.ADVANCE_PAYMENT ? formGraceDays * 86400 : 0;
+        const tx = await vault.createProposal(
+          formPropType,
+          formRecipient,
+          ethers.parseEther(formAmount),
+          formDescription,
+          execSecs,
+          graceSecs
+        );
+
+        setTxStage("broadcasting");
+        setActiveTxHash(tx.hash);
+        setTxStageMessage(`3/5: Broadcast to MST Testnet! Tx: ${tx.hash.slice(0, 10)}...`);
+
+        setTxStage("confirming");
+        setTxStageMessage("4/5: Awaiting block confirmation on MST Blockchain...");
+        await tx.wait();
+
+        setTxStage("success");
+        setTxStageMessage("5/5: Proposal recorded on MST Blockchain!");
+        setShowCreateModal(false);
+        setFormRecipient("");
+        setFormAmount("");
+        setFormDescription("");
+        setStatusMessage("Proposal created and confirmed on MST Testnet!");
+        await syncOnChainVault();
+      } catch (err: any) {
+        console.error("Create proposal failed:", err);
+        const parsed = parseWalletError(err);
+        setTxStage("error");
+        if (parsed.isExtensionReload) {
+          setIsExtensionReloadRequired(true);
+          setTxStageMessage("BridgeKey extension was reloaded. Please refresh this page to reconnect.");
+        } else if (parsed.isUserReject) {
+          setTxStageMessage("Proposal creation was rejected in wallet.");
+        } else {
+          setTxStageMessage(`Failed: ${parsed.message}`);
+        }
+      }
+      return;
+    }
+
+    // Demo simulation fallback
     const newId = proposals.length + 1;
     const newProposal: ProposalData = {
       id: newId,
       proposalType: formPropType,
       status: ProposalStatus.PENDING,
-      proposer: account || "0x06e08cf0aed1663834E267E90333164a0276bbbD",
+      proposer: account || "0xF09192ed618C49e9f9A439D97d798F8c600A38a8",
       recipient: formRecipient,
       amount: formAmount,
       description: formDescription,
@@ -396,11 +1121,58 @@ export const App: React.FC = () => {
     setFormRecipient("");
     setFormAmount("");
     setFormDescription("");
-    setStatusMessage(`Proposal #${newId} created! Initial affirmative vote recorded by proposer.`);
+    setStatusMessage(`[Demo Simulation] Proposal #${newId} created. Initial affirmative vote recorded.`);
   };
 
   // Vote on Proposal
-  const handleVoteProposal = (id: number, approve: boolean) => {
+  const handleVoteProposal = async (id: number, approve: boolean) => {
+    const hasOnChainAddress = ethers.isAddress(vaultAddress);
+    if (isContractDeployedOnChain || hasOnChainAddress) {
+      if (!verifyTxPreflight(vaultAddress, "submit vote")) {
+        return;
+      }
+      setVotingProposalId(id);
+      try {
+        setTxStage("requesting");
+        setTxStageMessage(`1/5: Requesting vote (${approve ? "Approve" : "Reject"}) in BridgeKey wallet...`);
+        const vault = await getActiveContract(vaultAddress, ClubVaultABI);
+        if (!vault) throw new Error("BridgeKey wallet provider not available. Please ensure BridgeKey is unlocked.");
+
+        setTxStage("signing");
+        setTxStageMessage(`2/5: Awaiting wallet confirmation in BridgeKey to vote on Proposal #${id}... (Click BridgeKey icon in toolbar)`);
+        const tx = await vault.voteProposal(id, approve);
+
+        setTxStage("broadcasting");
+        setActiveTxHash(tx.hash);
+        setTxStageMessage(`3/5: Vote broadcast! Tx: ${tx.hash.slice(0, 10)}...`);
+
+        setTxStage("confirming");
+        setTxStageMessage("4/5: Awaiting block confirmation on MST Blockchain...");
+        await tx.wait();
+
+        setTxStage("success");
+        setTxStageMessage("5/5: Vote recorded on-chain on MST Testnet!");
+        setStatusMessage(`Vote recorded on Proposal #${id} on MST Testnet.`);
+        await syncOnChainVault();
+      } catch (err: any) {
+        console.error("Vote failed:", err);
+        const parsed = parseWalletError(err);
+        setTxStage("error");
+        if (parsed.isExtensionReload) {
+          setIsExtensionReloadRequired(true);
+          setTxStageMessage("BridgeKey extension was reloaded. Please refresh this page to reconnect.");
+        } else if (parsed.isUserReject) {
+          setTxStageMessage("Vote rejected in BridgeKey wallet.");
+        } else {
+          setTxStageMessage(`Vote failed: ${parsed.message}`);
+        }
+      } finally {
+        setVotingProposalId(null);
+      }
+      return;
+    }
+
+    // Demo simulation fallback
     setProposals((prev) =>
       prev.map((p) => {
         if (p.id !== id) return p;
@@ -411,7 +1183,6 @@ export const App: React.FC = () => {
         let newStatus = p.status;
         if (newApprovals >= requiredApprovals) {
           newStatus = ProposalStatus.APPROVED;
-          // Accounting: lock in reserved funds
           const amt = parseFloat(p.amount);
           setReservedFunds((prevRes) => (parseFloat(prevRes) + amt).toFixed(2));
           setAvailableFunds((prevAvail) => (parseFloat(prevAvail) - amt).toFixed(2));
@@ -427,68 +1198,181 @@ export const App: React.FC = () => {
         };
       })
     );
-    setStatusMessage(`Vote recorded on Proposal #${id} (${approve ? "Affirmative" : "Rejected"})`);
+    setStatusMessage(`[Demo Simulation] Vote recorded on Proposal #${id} (${approve ? "Affirmative" : "Rejected"})`);
+    setVotingProposalId(null);
   };
 
-  // Execute Proposal
+  // Execute Proposal - Opens Pre-Flight Verification Summary
   const handleExecuteProposal = (id: number) => {
-    const executedTxHash = "0x" + Array.from({ length: 64 }, () => Math.floor(Math.random() * 16).toString(16)).join("");
     const targetProp = proposals.find((x) => x.id === id);
+    if (!targetProp) return;
+    setExecutionConfirmProposal(targetProp);
+  };
 
-    setProposals((prev) =>
-      prev.map((p) => {
-        if (p.id !== id) return p;
+  // Called when user confirms pre-flight verification summary
+  const proceedExecuteProposal = async (targetProp: ProposalData) => {
+    setExecutionConfirmProposal(null);
+    const id = targetProp.id;
+    const hasOnChainAddress = ethers.isAddress(vaultAddress);
+    if (isContractDeployedOnChain || hasOnChainAddress) {
+      if (!verifyTxPreflight(vaultAddress, "execute disbursement")) {
+        return;
+      }
+      try {
+        setTxStage("requesting");
+        setTxStageMessage(`1/5: Requesting payment disbursement in BridgeKey for Proposal #${id} (executeProposal selector: 0x0d61b519)...`);
+        const vault = await getActiveContract(vaultAddress, ClubVaultABI);
+        if (!vault) throw new Error("BridgeKey wallet provider not available. Please ensure BridgeKey is unlocked.");
 
-        const amt = parseFloat(p.amount);
-        setVaultBalance((prevBal) => (parseFloat(prevBal) - amt).toFixed(2));
-        setReservedFunds((prevRes) => (parseFloat(prevRes) - amt).toFixed(2));
+        setTxStage("signing");
+        setTxStageMessage(`2/5: Awaiting wallet signature to execute Proposal #${id}...`);
+        const tx = await vault.executeProposal(id);
 
-        // Add to Transaction History
+        setTxStage("broadcasting");
+        setActiveTxHash(tx.hash);
+        setTxStageMessage(`3/5: Broadcast! Tx: ${tx.hash.slice(0, 10)}...`);
+
+        setTxStage("confirming");
+        setTxStageMessage("4/5: Awaiting block confirmation on MST Blockchain...");
+        const receipt = await tx.wait();
+
+        setTxStage("success");
+        setTxStageMessage("5/5: Proposal executed & funds disbursed on MST Testnet!");
+
+        const executedTxHash = receipt.hash || tx.hash;
+
         const newTx: TransactionRecord = {
           id: `tx-${Date.now()}`,
-          type: p.proposalType === ProposalType.STANDARD_PAYMENT ? "STANDARD_DISBURSEMENT" : "ADVANCE_DISBURSEMENT",
-          amount: `${p.amount} tMSTC`,
-          fromOrTo: p.recipient,
+          type: targetProp.proposalType === ProposalType.STANDARD_PAYMENT ? "STANDARD_DISBURSEMENT" : "ADVANCE_DISBURSEMENT",
+          amount: `${targetProp.amount} tMSTC`,
+          fromOrTo: targetProp.recipient,
           txHash: executedTxHash,
           timestamp: Math.floor(Date.now() / 1000),
           status: "CONFIRMED",
         };
-        setTransactions((t) => [newTx, ...t]);
+        setLiveTransactions((t) => [newTx, ...t.filter((x) => x.txHash !== newTx.txHash)]);
 
-        if (p.proposalType === ProposalType.STANDARD_PAYMENT) {
-          return { ...p, status: ProposalStatus.EXECUTED, txHash: executedTxHash };
+        setConfirmedTxData({
+          isOpen: true,
+          txHash: executedTxHash,
+          amount: targetProp.amount,
+          recipient: targetProp.recipient,
+          proposalId: targetProp.id,
+          proposalDescription: targetProp.description,
+        });
+
+        setStatusMessage(`Proposal #${id} executed! Funds disbursed on MST Blockchain.`);
+        await syncOnChainVault();
+      } catch (err: any) {
+        console.error("Execution failed:", err);
+        const parsed = parseWalletError(err);
+        setTxStage("error");
+        if (parsed.isExtensionReload) {
+          setIsExtensionReloadRequired(true);
+          setTxStageMessage("BridgeKey extension was reloaded. Please refresh this page to reconnect.");
+        } else if (parsed.isUserReject) {
+          setTxStageMessage("Execution transaction was rejected in wallet.");
         } else {
-          // Advance payment disbursed
-          setUnconfirmedAdvances((prevAdv) => (parseFloat(prevAdv) + amt).toFixed(2));
+          setTxStageMessage(`Execution failed: ${parsed.message}`);
+        }
+      }
+      return;
+    }
+
+    // Demo simulation fallback
+    const executedTxHash = "DEMO-EXEC-" + id + "-" + Date.now().toString(16);
+    const amt = parseFloat(targetProp.amount);
+    setVaultBalance((prevBal) => (parseFloat(prevBal) - amt).toFixed(2));
+    setReservedFunds((prevRes) => (parseFloat(prevRes) - amt).toFixed(2));
+
+    const newTx: TransactionRecord = {
+      id: `tx-${Date.now()}`,
+      type: targetProp.proposalType === ProposalType.STANDARD_PAYMENT ? "STANDARD_DISBURSEMENT" : "ADVANCE_DISBURSEMENT",
+      amount: `${targetProp.amount} tMSTC`,
+      fromOrTo: targetProp.recipient,
+      txHash: executedTxHash,
+      timestamp: Math.floor(Date.now() / 1000),
+      status: "CONFIRMED",
+    };
+    setDemoTransactions((t) => [newTx, ...t]);
+
+    setProposals((prev) =>
+      prev.map((p) => {
+        if (p.id !== id) return p;
+        if (p.proposalType === ProposalType.STANDARD_PAYMENT) {
+          return { ...p, status: ProposalStatus.EXECUTED };
+        } else {
           return {
             ...p,
             status: ProposalStatus.ADVANCE_DISBURSED,
             receiptDeadline: Math.floor(Date.now() / 1000) + p.receiptGracePeriod,
-            txHash: executedTxHash,
           };
         }
       })
     );
 
-    // Trigger Payment Confirmation Modal
-    if (targetProp) {
-      setConfirmedTxData({
-        isOpen: true,
-        txHash: executedTxHash,
-        amount: targetProp.amount,
-        recipient: targetProp.recipient,
-        proposalId: targetProp.id,
-        proposalDescription: targetProp.description,
-      });
-    }
+    setConfirmedTxData({
+      isOpen: true,
+      txHash: executedTxHash,
+      amount: targetProp.amount,
+      recipient: targetProp.recipient,
+      proposalId: targetProp.id,
+      proposalDescription: targetProp.description,
+    });
 
-    setStatusMessage(`Proposal #${id} executed! Funds disbursed to recipient on MST Blockchain.`);
+    setStatusMessage(`[Demo Simulation] Proposal #${id} executed. Funds simulated as disbursed.`);
   };
 
+
+
   // Submit Receipt Action
-  const handleSubmitReceiptModal = (hash: string, memo: string) => {
+  const handleSubmitReceiptModal = async (hash: string, memo: string) => {
     if (!receiptTargetProposalId) return;
 
+    if (isContractDeployedOnChain && account) {
+      if (!verifyTxPreflight(vaultAddress, "register receipt")) {
+        return;
+      }
+      try {
+        setTxStage("requesting");
+        setTxStageMessage("1/5: Requesting receipt registration in wallet...");
+        const vault = await getActiveContract(vaultAddress, ClubVaultABI);
+        if (!vault) throw new Error("BridgeKey wallet provider not available.");
+
+        setTxStage("signing");
+        setTxStageMessage("2/5: Awaiting wallet signature to register receipt digest...");
+        const tx = await vault.submitReceipt(receiptTargetProposalId, hash, memo);
+
+        setTxStage("broadcasting");
+        setActiveTxHash(tx.hash);
+        setTxStageMessage(`3/5: Receipt broadcast! Tx: ${tx.hash.slice(0, 10)}...`);
+
+        setTxStage("confirming");
+        setTxStageMessage("4/5: Awaiting block confirmation...");
+        await tx.wait();
+
+        setTxStage("success");
+        setTxStageMessage("5/5: Receipt hash registered on-chain!");
+        setShowReceiptModal(false);
+        setStatusMessage(`Receipt registered for Advance #${receiptTargetProposalId} on MST Testnet.`);
+        await syncOnChainVault();
+      } catch (err: any) {
+        console.error("Submit receipt failed:", err);
+        const parsed = parseWalletError(err);
+        setTxStage("error");
+        if (parsed.isExtensionReload) {
+          setIsExtensionReloadRequired(true);
+          setTxStageMessage("BridgeKey extension was reloaded. Please refresh this page to reconnect.");
+        } else if (parsed.isUserReject) {
+          setTxStageMessage("Receipt submission was rejected in wallet.");
+        } else {
+          setTxStageMessage(`Submission failed: ${parsed.message}`);
+        }
+      }
+      return;
+    }
+
+    // Demo fallback
     setProposals((prev) =>
       prev.map((p) => {
         if (p.id !== receiptTargetProposalId) return p;
@@ -502,11 +1386,55 @@ export const App: React.FC = () => {
     );
 
     setShowReceiptModal(false);
-    setStatusMessage(`Receipt hash registered on Advance #${receiptTargetProposalId}. Member quorum confirmation active.`);
+    setStatusMessage(`[Demo Simulation] Receipt hash registered on Advance #${receiptTargetProposalId}.`);
   };
 
   // Vote on Receipt Confirmation
-  const handleVoteReceipt = (id: number, confirm: boolean) => {
+  const handleVoteReceipt = async (id: number, confirm: boolean) => {
+    if (isContractDeployedOnChain && account) {
+      if (!verifyTxPreflight(vaultAddress, "review receipt")) {
+        return;
+      }
+      try {
+        setTxStage("requesting");
+        setTxStageMessage("1/5: Requesting receipt review vote in wallet...");
+        const vault = await getActiveContract(vaultAddress, ClubVaultABI);
+        if (!vault) throw new Error("BridgeKey wallet provider not available.");
+
+        setTxStage("signing");
+        setTxStageMessage("2/5: Awaiting wallet signature for receipt confirmation...");
+        const reason = confirm ? "Receipt confirmed by member" : "Receipt rejected/disputed by member";
+        const tx = await vault.voteOnReceipt(id, confirm, reason);
+
+        setTxStage("broadcasting");
+        setActiveTxHash(tx.hash);
+        setTxStageMessage(`3/5: Broadcast! Tx: ${tx.hash.slice(0, 10)}...`);
+
+        setTxStage("confirming");
+        setTxStageMessage("4/5: Awaiting confirmation...");
+        await tx.wait();
+
+        setTxStage("success");
+        setTxStageMessage("5/5: Receipt vote recorded on-chain!");
+        setStatusMessage(`Receipt vote on Advance #${id} recorded on MST Testnet.`);
+        await syncOnChainVault();
+      } catch (err: any) {
+        console.error("Vote receipt failed:", err);
+        const parsed = parseWalletError(err);
+        setTxStage("error");
+        if (parsed.isExtensionReload) {
+          setIsExtensionReloadRequired(true);
+          setTxStageMessage("BridgeKey extension was reloaded. Please refresh this page to reconnect.");
+        } else if (parsed.isUserReject) {
+          setTxStageMessage("Receipt vote rejected in wallet.");
+        } else {
+          setTxStageMessage(`Receipt vote failed: ${parsed.message}`);
+        }
+      }
+      return;
+    }
+
+    // Demo fallback
     setProposals((prev) =>
       prev.map((p) => {
         if (p.id !== id) return p;
@@ -531,7 +1459,8 @@ export const App: React.FC = () => {
         };
       })
     );
-    setStatusMessage(`Receipt vote recorded on Advance #${id} (${confirm ? "Confirmed" : "Disputed"})`);
+
+    setStatusMessage(`[Demo Simulation] Receipt vote recorded on Advance #${id} (${confirm ? "Confirmed" : "Disputed"})`);
   };
 
   // Mark Defaulted
@@ -546,12 +1475,66 @@ export const App: React.FC = () => {
   };
 
   // Repay Advance
-  const handleRepayAdvance = (id: number) => {
+  const handleRepayAdvance = async (id: number) => {
     const p = proposals.find((x) => x.id === id);
     if (!p) return;
     const amt = parseFloat(p.amount);
 
-    setVaultBalance((prevBal) => (parseFloat(prevBal) + amt).toFixed(2));
+    if (isContractDeployedOnChain && account) {
+      if (!verifyTxPreflight(vaultAddress, "refund advance")) {
+        return;
+      }
+      try {
+        setTxStage("requesting");
+        setTxStageMessage("1/5: Requesting advance refund transaction in wallet...");
+        const vault = await getActiveContract(vaultAddress, ClubVaultABI);
+        if (!vault) throw new Error("BridgeKey wallet provider not available.");
+
+        setTxStage("signing");
+        setTxStageMessage(`2/5: Awaiting signature for refund of ${amt} tMSTC...`);
+        const tx = await vault.repayAdvance(id, { value: ethers.parseEther(p.amount) });
+
+        setTxStage("broadcasting");
+        setActiveTxHash(tx.hash);
+        setTxStageMessage(`3/5: Broadcast! Tx: ${tx.hash.slice(0, 10)}...`);
+
+        setTxStage("confirming");
+        setTxStageMessage("4/5: Awaiting block confirmation...");
+        const receipt = await tx.wait();
+
+        setTxStage("success");
+        setTxStageMessage("5/5: Advance refunded to vault treasury!");
+
+        const repayTx: TransactionRecord = {
+          id: `tx-${Date.now()}`,
+          type: "REPAYMENT",
+          amount: `${amt} tMSTC`,
+          fromOrTo: p.recipient,
+          txHash: receipt.hash || tx.hash,
+          timestamp: Math.floor(Date.now() / 1000),
+          status: "CONFIRMED",
+        };
+        setLiveTransactions((t) => [repayTx, ...t.filter((x) => x.txHash !== repayTx.txHash)]);
+        setStatusMessage(`Advance #${id} refunded on MST Testnet.`);
+        await syncOnChainVault();
+      } catch (err: any) {
+        console.error("Repayment failed:", err);
+        const parsed = parseWalletError(err);
+        setTxStage("error");
+        if (parsed.isExtensionReload) {
+          setIsExtensionReloadRequired(true);
+          setTxStageMessage("BridgeKey extension was reloaded. Please refresh this page to reconnect.");
+        } else if (parsed.isUserReject) {
+          setTxStageMessage("Repayment rejected in wallet.");
+        } else {
+          setTxStageMessage(`Repayment failed: ${parsed.message}`);
+        }
+      }
+      return;
+    }
+
+    // Demo fallback
+    setVaultBalance((prevBal) => (parseFloat(prevBal) - amt).toFixed(2));
     setAvailableFunds((prevAvail) => (parseFloat(prevAvail) + amt).toFixed(2));
     setUnconfirmedAdvances((prevAdv) => Math.max(0, parseFloat(prevAdv) - amt).toFixed(2));
 
@@ -559,103 +1542,243 @@ export const App: React.FC = () => {
       prev.map((x) => (x.id === id ? { ...x, status: ProposalStatus.RECEIPT_REPAID } : x))
     );
 
-    // Record Repayment
     const repayTx: TransactionRecord = {
       id: `tx-${Date.now()}`,
       type: "REPAYMENT",
       amount: `${amt} tMSTC`,
       fromOrTo: p.recipient,
-      txHash: "0x" + Array.from({ length: 64 }, () => Math.floor(Math.random() * 16).toString(16)).join(""),
+      txHash: "DEMO-TX-REPAY-" + id + "-" + Date.now().toString(16),
       timestamp: Math.floor(Date.now() / 1000),
       status: "CONFIRMED",
     };
-    setTransactions((t) => [repayTx, ...t]);
+    setDemoTransactions((t) => [repayTx, ...t]);
 
-    setStatusMessage(`Advance #${id} fully repaid into vault treasury. Recipient unblocked.`);
+    setStatusMessage(`[Demo Simulation] Advance #${id} fully repaid into vault treasury.`);
+  };
+
+  // Strict Deposit Input Validator
+  const validateDepositInput = (raw: string): { isValid: boolean; parsedWei?: bigint; error?: string } => {
+    const trimmed = raw ? raw.trim() : "";
+    if (!trimmed) {
+      return { isValid: false, error: "Please enter a deposit amount." };
+    }
+    // Must be a valid non-negative decimal string (rejects signs, letters, double decimals, etc.)
+    if (!/^\d+(\.\d+)?$/.test(trimmed)) {
+      return { isValid: false, error: "Amount must be a valid positive number with no negative signs or symbols." };
+    }
+    try {
+      const wei = ethers.parseEther(trimmed);
+      if (wei <= 0n) {
+        return { isValid: false, error: "Deposit amount must be strictly greater than zero." };
+      }
+
+      // Check against connected wallet balance if connected
+      if (account && accountBalance) {
+        const balNum = parseFloat(accountBalance);
+        const enterNum = parseFloat(trimmed);
+        if (balNum > 0 && enterNum > balNum) {
+          return {
+            isValid: false,
+            error: `Entered amount (${trimmed} ${currencySymbol}) exceeds your wallet balance (${accountBalance} ${currencySymbol}). Please enter a lower amount.`,
+          };
+        }
+      }
+
+      return { isValid: true, parsedWei: wei };
+    } catch {
+      return { isValid: false, error: "Invalid decimal precision (maximum 18 decimal places supported)." };
+    }
   };
 
   // Deposit Funds
-  const handleDeposit = (e: React.FormEvent) => {
+  const handleDeposit = async (e: React.FormEvent) => {
     e.preventDefault();
-    const amt = parseFloat(formDepositAmount);
-    if (isNaN(amt) || amt <= 0) {
-      alert("Invalid deposit amount.");
+    const validation = validateDepositInput(formDepositAmount);
+    if (!validation.isValid || !validation.parsedWei) {
+      setDepositInputError(validation.error || "Invalid deposit amount.");
+      setStatusMessage(`Validation Error: ${validation.error || "Invalid deposit amount."}`);
+      return;
+    }
+    setDepositInputError(null);
+
+    const wei = validation.parsedWei;
+    const formattedAmount = formDepositAmount.trim();
+
+    if (isContractDeployedOnChain && account) {
+      if (!verifyTxPreflight(vaultAddress, "deposit funds")) {
+        return;
+      }
+      try {
+        setTxStage("requesting");
+        setTxStageMessage(`1/5: Requesting deposit of ${formattedAmount} ${currencySymbol} in your BridgeKey wallet...`);
+        const vault = await getActiveContract(vaultAddress, ClubVaultABI);
+        if (!vault) throw new Error("BridgeKey wallet provider not available.");
+
+        setTxStage("signing");
+        setTxStageMessage(`2/5: Awaiting wallet signature for deposit of ${formattedAmount} ${currencySymbol} to ${vaultAddress}...`);
+        const tx = await vault.deposit({ value: wei });
+
+        setTxStage("broadcasting");
+        setActiveTxHash(tx.hash);
+        setTxStageMessage(`3/5: Broadcast to ${networkName}! Tx: ${tx.hash.slice(0, 10)}... (Awaiting confirmation)`);
+
+        setTxStage("confirming");
+        setTxStageMessage("4/5: Awaiting block confirmation on MST Blockchain...");
+        const receipt = await tx.wait();
+
+        setTxStage("success");
+        setTxStageMessage(`5/5: Deposit confirmed on ${networkName}! (Block ${receipt.blockNumber || "mined"})`);
+
+        const depTx: TransactionRecord = {
+          id: `tx-${Date.now()}`,
+          type: "DEPOSIT",
+          amount: `${formattedAmount} ${currencySymbol}`,
+          fromOrTo: account,
+          txHash: receipt.hash || tx.hash,
+          timestamp: Math.floor(Date.now() / 1000),
+          status: "CONFIRMED",
+        };
+        setLiveTransactions((t) => [depTx, ...t.filter((x) => x.txHash !== depTx.txHash)]);
+        // Only clear input after confirmed on-chain transaction outcome
+        setFormDepositAmount("");
+        setStatusMessage(`Deposited ${formattedAmount} ${currencySymbol} successfully on ${networkName}!`);
+        await syncOnChainVault();
+      } catch (err: any) {
+        console.error("Deposit failed:", err);
+        const parsed = parseWalletError(err);
+        setTxStage("error");
+        if (parsed.isExtensionReload) {
+          setIsExtensionReloadRequired(true);
+          setTxStageMessage("BridgeKey extension was reloaded in the background. Please refresh this page to reconnect.");
+          setStatusMessage("Notice: BridgeKey extension was updated in the background. Please refresh this page.");
+        } else if (parsed.isUserReject) {
+          setTxStageMessage("Deposit transaction was rejected by user in BridgeKey wallet.");
+          setStatusMessage("Notice: Deposit was cancelled in your wallet. The entered amount has been preserved.");
+        } else {
+          setTxStageMessage(`Deposit failed: ${parsed.message}`);
+          setStatusMessage(`Deposit transaction failed: ${parsed.message}`);
+        }
+      }
       return;
     }
 
-    setVaultBalance((prevBal) => (parseFloat(prevBal) + amt).toFixed(2));
-    setAvailableFunds((prevAvail) => (parseFloat(prevAvail) + amt).toFixed(2));
+    // Demo fallback
+    const amtNumber = Number(formattedAmount);
+    setVaultBalance((prevBal) => (parseFloat(prevBal) + amtNumber).toFixed(2));
+    setAvailableFunds((prevAvail) => (parseFloat(prevAvail) + amtNumber).toFixed(2));
 
     const depTx: TransactionRecord = {
       id: `tx-${Date.now()}`,
       type: "DEPOSIT",
-      amount: `${amt} tMSTC`,
-      fromOrTo: account || "0x06e08cf0aed1663834E267E90333164a0276bbbD",
-      txHash: "0x" + Array.from({ length: 64 }, () => Math.floor(Math.random() * 16).toString(16)).join(""),
+      amount: `${formattedAmount} tMSTC`,
+      fromOrTo: account || "0xF09192ed618C49e9f9A439D97d798F8c600A38a8",
+      txHash: "DEMO-TX-DEP-" + Date.now().toString(16),
       timestamp: Math.floor(Date.now() / 1000),
       status: "CONFIRMED",
     };
-    setTransactions((t) => [depTx, ...t]);
+    setDemoTransactions((t) => [depTx, ...t]);
 
     setFormDepositAmount("");
-    setStatusMessage(`Deposited ${amt} tMSTC into ClubVault treasury.`);
+    setStatusMessage(`[Demo Simulation] Deposited ${formattedAmount} tMSTC into ClubVault.`);
   };
 
-  // Deploy New Vault
-  const handleDeployNewVault = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!factoryClubName.trim()) {
+  // Expire Proposal Action (Releases reserved funds after execution deadline)
+  const handleExpireProposal = async (id: number) => {
+    if (isContractDeployedOnChain && account) {
+      try {
+        setTxStage("requesting");
+        setTxStageMessage("1/5: Requesting proposal expiration transaction...");
+        const vault = await getActiveContract(vaultAddress, ClubVaultABI);
+        if (!vault) throw new Error("BridgeKey wallet provider not available.");
+
+        setTxStage("signing");
+        setTxStageMessage(`2/5: Awaiting wallet signature to expire Proposal #${id}...`);
+        const tx = await vault.markProposalExpired(id);
+
+        setTxStage("broadcasting");
+        setActiveTxHash(tx.hash);
+        setTxStageMessage(`3/5: Broadcast! Tx: ${tx.hash.slice(0, 10)}...`);
+
+        setTxStage("confirming");
+        setTxStageMessage("4/5: Awaiting confirmation...");
+        await tx.wait();
+
+        setTxStage("success");
+        setTxStageMessage("5/5: Proposal marked expired & reserved funds released!");
+        setStatusMessage(`Proposal #${id} expired and funds released on MST Testnet.`);
+        await syncOnChainVault();
+      } catch (err: any) {
+        console.error("Mark expired failed:", err);
+        setTxStage("error");
+        setTxStageMessage(err.code === 4001 || err.action === "reject" ? "Action rejected in wallet." : `Failed: ${err.message || "Contract error"}`);
+      }
+      return;
+    }
+
+    // Demo simulation fallback
+    const targetProp = proposals.find((x) => x.id === id);
+    if (!targetProp) return;
+    const amt = parseFloat(targetProp.amount);
+    setReservedFunds((prevRes) => Math.max(0, parseFloat(prevRes) - amt).toFixed(2));
+    setAvailableFunds((prevAvail) => (parseFloat(prevAvail) + amt).toFixed(2));
+    setProposals((prev) =>
+      prev.map((p) => (p.id === id ? { ...p, status: ProposalStatus.REJECTED } : p))
+    );
+    setStatusMessage(`[Demo Simulation] Proposal #${id} marked as expired and reserved funds released.`);
+  };
+
+  // Deploy New Vault using Organization Template or Custom Config
+  const handleDeployWithTemplate = async (
+    tplName: string,
+    tplDesc: string,
+    memberArray: string[],
+    quorum: number
+  ) => {
+    if (!tplName.trim()) {
       alert("Please provide a club name.");
       return;
     }
-    const memberArray = factoryMembers
-      .split(",")
-      .map((m) => m.trim())
-      .filter((m) => m.length > 0);
-
     if (memberArray.length === 0) {
       alert("Please provide at least one member address.");
       return;
     }
-
     if (memberArray.length > 50) {
       alert("Maximum allowed members is 50 to prevent gas limit issues.");
       return;
     }
-
     for (const m of memberArray) {
       if (!ethers.isAddress(m)) {
         alert(`Invalid Ethereum address format: "${m}". All member addresses must be valid 0x addresses.`);
         return;
       }
     }
-
     const normalizedMembers = memberArray.map((m) => m.toLowerCase());
     if (new Set(normalizedMembers).size !== memberArray.length) {
       alert("Duplicate member addresses detected. All member addresses must be unique.");
       return;
     }
-
-    if (factoryQuorum < 1 || factoryQuorum > memberArray.length) {
+    if (quorum < 1 || quorum > memberArray.length) {
       alert(`Required approvals must be between 1 and ${memberArray.length} (total members).`);
       return;
     }
 
-    // Live on-chain deployment if wallet connected
-    if (typeof (window as any).ethereum !== "undefined" && isLiveConnected && account) {
+    if (
+      isLiveConnected &&
+      account &&
+      CONTRACT_ADDRESSES.VaultFactory
+    ) {
       try {
         setIsDeployingVault(true);
         setStatusMessage("Submitting createVault transaction to VaultFactory on MST Testnet...");
 
-        const provider = new ethers.BrowserProvider((window as any).ethereum);
-        const signer = await provider.getSigner();
-        const factory = new ethers.Contract(CONTRACT_ADDRESSES.VaultFactory, VaultFactoryABI, signer);
+        const factory = await getActiveContract(CONTRACT_ADDRESSES.VaultFactory, VaultFactoryABI);
+        if (!factory) throw new Error("BridgeKey wallet provider not available.");
 
         const tx = await factory.createVault(
-          factoryClubName.trim(),
-          factoryClubDesc.trim(),
+          tplName.trim(),
+          tplDesc.trim(),
           memberArray,
-          factoryQuorum
+          quorum
         );
 
         setStatusMessage(`Transaction broadcast: ${tx.hash.slice(0, 10)}... Awaiting block confirmation...`);
@@ -677,18 +1800,20 @@ export const App: React.FC = () => {
           newVaultAddress = allVaults[allVaults.length - 1];
         }
 
-        setClubName(factoryClubName.trim());
-        setClubDescription(factoryClubDesc.trim());
+        setClubName(tplName.trim());
+        setClubDescription(tplDesc.trim());
         setMembers(memberArray);
-        setRequiredApprovals(factoryQuorum);
+        setRequiredApprovals(quorum);
         setVaultAddress(newVaultAddress);
         setVaultBalance("0.0");
         setAvailableFunds("0.0");
         setReservedFunds("0.0");
         setUnconfirmedAdvances("0.0");
         setProposals([]);
+        setLiveTransactions([]);
         setShowFactoryModal(false);
         setStatusMessage(`✔ VaultFactory created new ClubVault on-chain at ${newVaultAddress}`);
+        navigateToRoute("app");
       } catch (err: any) {
         console.error("Factory deployment error:", err);
         if (err.code === "ACTION_REJECTED" || err.message?.includes("rejected")) {
@@ -699,17 +1824,19 @@ export const App: React.FC = () => {
             from: account || "0x06e08cf0aed1663834E267E90333164a0276bbbD",
             nonce: Math.floor(Math.random() * 100),
           });
-          setClubName(factoryClubName.trim());
-          setClubDescription(factoryClubDesc.trim());
+          setClubName(tplName.trim());
+          setClubDescription(tplDesc.trim());
           setMembers(memberArray);
-          setRequiredApprovals(factoryQuorum);
+          setRequiredApprovals(quorum);
           setVaultAddress(mockNewVaultAddr);
           setVaultBalance("0.0");
           setAvailableFunds("0.0");
           setReservedFunds("0.0");
           setUnconfirmedAdvances("0.0");
           setProposals([]);
+          setDemoTransactions([]);
           setShowFactoryModal(false);
+          navigateToRoute("app");
         }
       } finally {
         setIsDeployingVault(false);
@@ -721,20 +1848,31 @@ export const App: React.FC = () => {
         nonce: Math.floor(Math.random() * 100),
       });
 
-      setClubName(factoryClubName.trim());
-      setClubDescription(factoryClubDesc.trim());
+      setClubName(tplName.trim());
+      setClubDescription(tplDesc.trim());
       setMembers(memberArray);
-      setRequiredApprovals(factoryQuorum);
+      setRequiredApprovals(quorum);
       setVaultAddress(mockNewVaultAddr);
       setVaultBalance("0.0");
       setAvailableFunds("0.0");
       setReservedFunds("0.0");
       setUnconfirmedAdvances("0.0");
       setProposals([]);
+      setDemoTransactions([]);
 
       setShowFactoryModal(false);
       setStatusMessage(`Simulation notice: Wallet not connected to live network. Simulated ClubVault created at ${mockNewVaultAddr}`);
+      navigateToRoute("app");
     }
+  };
+
+  const handleDeployNewVault = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const memberArray = factoryMembers
+      .split(",")
+      .map((m) => m.trim())
+      .filter((m) => m.length > 0);
+    await handleDeployWithTemplate(factoryClubName, factoryClubDesc, memberArray, factoryQuorum);
   };
 
   // Filtered proposals calculation
@@ -766,32 +1904,477 @@ export const App: React.FC = () => {
       <Navbar
         account={account}
         accountBalance={accountBalance}
-        isCorrectNetwork={isCorrectNetwork}
+        isCorrectNetwork={isCorrectNetwork && walletStatus !== "WRONG_NETWORK"}
         onConnectWallet={connectWallet}
+        onOpenAccountModal={() => setShowBridgeKeyModal(true)}
         onSwitchNetwork={switchNetwork}
+        isConnecting={walletStatus === "CONNECTING"}
+        currencySymbol={currencySymbol}
         activeSection={activeNavSection}
         onNavigateSection={scrollToSection}
         onOpenFactoryModal={() => setShowFactoryModal(true)}
+        onOpenMainnetModal={() => setShowMainnetModal(true)}
+        currentRoute={currentRoute}
+        onNavigateRoute={navigateToRoute}
+        theme={theme}
+        onToggleTheme={toggleTheme}
       />
 
-      {/* 2. Scroll-Linked 3D Vault Cinematic Experience */}
-      <VaultHeroExperience
-        vaultBalance={vaultBalance}
-        availableFunds={availableFunds}
-        reservedFunds={reservedFunds}
-        unconfirmedAdvances={unconfirmedAdvances}
-        membersCount={members.length}
-        requiredApprovals={requiredApprovals}
-        onExploreClick={() => scrollToSection("treasury")}
-        onConnectWallet={connectWallet}
-        account={account}
-      />
+      {/* Global Toast Notification for Instant Feedback */}
+      {statusMessage && (
+        <div
+          id="clubvault-floating-toast"
+          style={{
+            position: "fixed",
+            top: "76px",
+            right: "24px",
+            zIndex: 99999,
+            maxWidth: "420px",
+            padding: "0.85rem 1.25rem",
+            backgroundColor:
+              statusMessage.includes("cancelled") || statusMessage.includes("rejected")
+                ? "rgba(28, 22, 18, 0.97)"
+                : statusMessage.includes("successfully")
+                ? "rgba(14, 28, 20, 0.97)"
+                : "rgba(18, 19, 26, 0.97)",
+            backdropFilter: "blur(16px)",
+            border: `1.5px solid ${
+              statusMessage.includes("cancelled") || statusMessage.includes("rejected")
+                ? "rgba(245, 158, 11, 0.7)"
+                : statusMessage.includes("successfully")
+                ? "rgba(16, 185, 129, 0.7)"
+                : "rgba(255, 48, 59, 0.5)"
+            }`,
+            borderRadius: "var(--radius-md)",
+            boxShadow: "0 10px 30px rgba(0, 0, 0, 0.5)",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            gap: "0.85rem",
+            color: "var(--text-primary)",
+          }}
+        >
+          <div style={{ display: "flex", alignItems: "center", gap: "0.6rem", fontSize: "0.88rem", fontWeight: 600 }}>
+            {statusMessage.includes("successfully") ? (
+              <span style={{ width: "9px", height: "9px", borderRadius: "50%", backgroundColor: "#10B981", boxShadow: "0 0 10px #10B981", flexShrink: 0 }} />
+            ) : statusMessage.includes("cancelled") || statusMessage.includes("rejected") ? (
+              <span style={{ width: "9px", height: "9px", borderRadius: "50%", backgroundColor: "#F59E0B", boxShadow: "0 0 10px #F59E0B", flexShrink: 0 }} />
+            ) : (
+              <span style={{ width: "9px", height: "9px", borderRadius: "50%", backgroundColor: "var(--accent-crimson)", boxShadow: "0 0 10px var(--accent-crimson)", flexShrink: 0 }} />
+            )}
+            <span>{statusMessage}</span>
+          </div>
+          <button
+            onClick={() => setStatusMessage(null)}
+            style={{
+              background: "transparent",
+              border: "none",
+              color: "var(--text-muted)",
+              cursor: "pointer",
+              padding: "0.2rem",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+            }}
+            aria-label="Dismiss notification"
+          >
+            <X style={{ width: "16px", height: "16px" }} />
+          </button>
+        </div>
+      )}
 
-      {/* 3. How It Works Section */}
-      <HowItWorksSection />
+      {/* Background Extension Reload Alert Banner */}
+      {isExtensionReloadRequired && (
+        <div
+          id="extension-reload-banner"
+          style={{
+            background: "linear-gradient(90deg, #DC2626 0%, #B91C1C 100%)",
+            color: "#FFFFFF",
+            padding: "0.85rem 1.5rem",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            boxShadow: "0 4px 20px rgba(220, 38, 38, 0.4)",
+            position: "sticky",
+            top: 0,
+            zIndex: 10000,
+          }}
+        >
+          <div style={{ display: "flex", alignItems: "center", gap: "0.75rem", fontSize: "0.92rem", fontWeight: 600 }}>
+            <AlertTriangle style={{ width: "20px", height: "20px" }} />
+            <span>Chrome updated the BridgeKey extension in the background. Please reload this tab to reconnect.</span>
+          </div>
+          <button
+            className="btn btn-secondary"
+            onClick={() => window.location.reload()}
+            style={{
+              background: "#FFFFFF",
+              color: "#B91C1C",
+              fontWeight: 700,
+              padding: "0.45rem 1rem",
+              borderRadius: "6px",
+              border: "none",
+              cursor: "pointer",
+              display: "inline-flex",
+              alignItems: "center",
+              gap: "0.4rem",
+              fontSize: "0.85rem",
+            }}
+          >
+            <RefreshCw style={{ width: "14px", height: "14px" }} />
+            <span>Reload Page Now</span>
+          </button>
+        </div>
+      )}
 
-      {/* 4. Live Treasury Dashboard Section */}
-      <main id="treasury" className="container">
+      {/* 2. Public Marketing Views */}
+      {currentRoute === "pricing" && (
+        <>
+          <PricingView
+            onSelectPlan={() => {
+              navigateToRoute("app");
+              setShowFactoryModal(true);
+            }}
+            onNavigateHome={() => navigateToRoute("home")}
+          />
+          <PublicFooter onNavigate={navigateToRoute} />
+        </>
+      )}
+
+      {currentRoute === "docs" && (
+        <>
+          <DocsView />
+          <PublicFooter onNavigate={navigateToRoute} />
+        </>
+      )}
+
+      {currentRoute === "security" && (
+        <>
+          <SecurityView />
+          <PublicFooter onNavigate={navigateToRoute} />
+        </>
+      )}
+
+      {currentRoute === "faq" && (
+        <>
+          <FAQView />
+          <PublicFooter onNavigate={navigateToRoute} />
+        </>
+      )}
+
+      {currentRoute === "contact" && (
+        <>
+          <ContactView />
+          <PublicFooter onNavigate={navigateToRoute} />
+        </>
+      )}
+
+      {/* 3. Public Home Landing Page */}
+      {currentRoute === "home" && (
+        <>
+          {/* Scroll-Linked 3D Vault Cinematic Experience */}
+          <VaultHeroExperience
+            vaultBalance={vaultBalance}
+            availableFunds={availableFunds}
+            reservedFunds={reservedFunds}
+            unconfirmedAdvances={unconfirmedAdvances}
+            membersCount={members.length}
+            requiredApprovals={requiredApprovals}
+            onExploreClick={() => scrollToSection("treasury")}
+            onConnectWallet={connectWallet}
+            account={account}
+          />
+
+          {/* How It Works Section */}
+          <HowItWorksSection />
+
+          {/* Organisation Templates Archetypes Section */}
+          <section id="templates" className="container" style={{ padding: "4rem 2rem" }}>
+            <div style={{ textAlign: "center", maxWidth: "760px", margin: "0 auto 3rem auto" }}>
+              <div className="cv-badge cv-badge-crimson" style={{ margin: "0 auto 0.85rem auto" }}>
+                <Building style={{ width: "13px", height: "13px" }} />
+                <span>Tailored Governance Archetypes</span>
+              </div>
+              <h2 style={{ fontSize: "2.4rem", color: "var(--text-primary)", marginBottom: "0.75rem" }}>
+                Ready-to-Deploy Organisation Templates
+              </h2>
+              <p style={{ color: "var(--text-secondary)", fontSize: "1.05rem", lineHeight: 1.6 }}>
+                Whether you are managing a college technical club, a residential housing society, or a hackathon prize pool,
+                ClubVault provides verified governance presets with customizable multi-signature quorums.
+              </p>
+            </div>
+
+            <div
+              style={{
+                display: "grid",
+                gridTemplateColumns: "repeat(auto-fit, minmax(300px, 1fr))",
+                gap: "1.5rem",
+                marginBottom: "3rem",
+              }}
+            >
+              {TEMPLATES.map((tpl) => {
+                const Icon = tpl.icon;
+                return (
+                  <div
+                    key={tpl.id}
+                    className="glass-panel"
+                    style={{
+                      padding: "1.75rem",
+                      borderRadius: "var(--radius-md)",
+                      display: "flex",
+                      flexDirection: "column",
+                      justifyContent: "space-between",
+                    }}
+                  >
+                    <div>
+                      <div style={{ display: "flex", alignItems: "center", gap: "0.75rem", marginBottom: "1rem" }}>
+                        <div
+                          style={{
+                            width: "42px",
+                            height: "42px",
+                            borderRadius: "10px",
+                            background: "rgba(255, 48, 59, 0.12)",
+                            color: "var(--accent-crimson)",
+                            display: "flex",
+                            alignItems: "center",
+                            justifyContent: "center",
+                          }}
+                        >
+                          <Icon style={{ width: "20px", height: "20px" }} />
+                        </div>
+                        <div>
+                          <h3 style={{ fontSize: "1.15rem", color: "var(--text-primary)" }}>{tpl.title}</h3>
+                          <span style={{ fontSize: "0.75rem", color: "var(--accent-emerald)", fontFamily: "var(--font-mono)" }}>
+                            Quorum: {tpl.suggestedQuorum} of {tpl.sampleMembers.length}
+                          </span>
+                        </div>
+                      </div>
+                      <p style={{ fontSize: "0.86rem", color: "var(--text-secondary)", lineHeight: 1.6, marginBottom: "1.25rem" }}>
+                        {tpl.defaultDesc}
+                      </p>
+                    </div>
+
+                    <button
+                      onClick={() => {
+                        setShowFactoryModal(true);
+                      }}
+                      className="btn btn-secondary"
+                      style={{ width: "100%", justifyContent: "center", fontSize: "0.85rem", padding: "0.65rem" }}
+                    >
+                      <span>Configure with Template</span>
+                      <ArrowRight style={{ width: "14px", height: "14px" }} />
+                    </button>
+                  </div>
+                );
+              })}
+            </div>
+
+            {/* CTA to live workspace */}
+            <div
+              className="glass-panel"
+              style={{
+                padding: "2.5rem",
+                borderRadius: "var(--radius-md)",
+                display: "flex",
+                justifyContent: "space-between",
+                alignItems: "center",
+                flexWrap: "wrap",
+                gap: "1.5rem",
+                background: "linear-gradient(135deg, var(--bg-card) 0%, var(--bg-surface-elevated) 100%)",
+                border: "1px solid var(--border-crimson)",
+              }}
+            >
+              <div>
+                <h3 style={{ fontSize: "1.5rem", color: "var(--text-primary)", marginBottom: "0.5rem" }}>
+                  Explore the Live Interactive Treasury
+                </h3>
+                <p style={{ color: "var(--text-secondary)", fontSize: "0.95rem" }}>
+                  Test voting consensus, advance payouts, and receipt hashing in real time on the MST Testnet.
+                </p>
+              </div>
+              <button
+                onClick={() => scrollToSection("treasury")}
+                className="btn btn-primary"
+                style={{ padding: "0.85rem 1.75rem", fontSize: "0.95rem" }}
+              >
+                <span>Go to Treasury Dashboard</span>
+                <ArrowRight style={{ width: "16px", height: "16px" }} />
+              </button>
+            </div>
+          </section>
+
+          {/* 4. Live Treasury Workspace */}
+          <main id="treasury" className="container" style={{ paddingTop: "3rem" }}>
+        {/* Network & Contract Deployment Status Banner */}
+        <div
+          style={{
+            padding: "0.85rem 1.25rem",
+            marginBottom: "1.25rem",
+            borderRadius: "var(--radius-sm)",
+            backgroundColor: isContractDeployedOnChain ? "rgba(16, 185, 129, 0.08)" : "rgba(245, 158, 11, 0.08)",
+            border: `1px solid ${isContractDeployedOnChain ? "rgba(16, 185, 129, 0.3)" : "rgba(245, 158, 11, 0.3)"}`,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            flexWrap: "wrap",
+            gap: "0.75rem",
+            fontSize: "0.85rem",
+          }}
+        >
+          <div style={{ display: "flex", alignItems: "center", gap: "0.6rem" }}>
+            <span
+              style={{
+                width: "9px",
+                height: "9px",
+                borderRadius: "50%",
+                backgroundColor: isContractDeployedOnChain ? "#10B981" : "#F59E0B",
+                display: "inline-block",
+                boxShadow: isContractDeployedOnChain ? "0 0 10px #10B981" : "0 0 10px #F59E0B",
+              }}
+            />
+            {isContractDeployedOnChain ? (
+              <span style={{ color: "#10B981" }}>
+                <strong>
+                  {currentChainId === MST_MAINNET_CONFIG.chainId
+                    ? "MST Mainnet Production Live Mode:"
+                    : "MST Testnet Live Mode:"}
+                </strong>{" "}
+                Verified smart contract active at{" "}
+                <code style={{ fontFamily: "var(--font-mono)" }}>
+                  {vaultAddress.slice(0, 10)}...{vaultAddress.slice(-6)}
+                </code>
+                . Real on-chain state synchronized.
+              </span>
+            ) : (
+              <span style={{ color: "#F59E0B" }}>
+                <strong>Interactive Demo Simulation:</strong> Smart contracts are operating in simulation mode.
+              </span>
+            )}
+          </div>
+
+          <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+            <span
+              style={{
+                fontSize: "0.75rem",
+                padding: "0.2rem 0.6rem",
+                borderRadius: "var(--radius-pill)",
+                backgroundColor: isContractDeployedOnChain
+                  ? "rgba(16, 185, 129, 0.15)"
+                  : "rgba(245, 158, 11, 0.15)",
+                color: isContractDeployedOnChain ? "#10B981" : "#F59E0B",
+                fontFamily: "var(--font-mono)",
+                fontWeight: 700,
+              }}
+            >
+              {isContractDeployedOnChain
+                ? `CHAIN ID: ${currentChainId} (${
+                    currentChainId === MST_MAINNET_CONFIG.chainId ? "MAINNET" : "TESTNET"
+                  })`
+                : "DEMO SIMULATION"}
+            </span>
+          </div>
+        </div>
+
+        {/* Real-time 5-Stage Transaction Lifecycle Tracker */}
+        {txStage !== "idle" && (
+          <div
+            style={{
+              padding: "1rem 1.25rem",
+              marginBottom: "1.5rem",
+              borderRadius: "var(--radius-sm)",
+              backgroundColor: "rgba(18, 19, 26, 0.95)",
+              backdropFilter: "blur(12px)",
+              border: `1.5px solid ${txStage === "error" ? "#EF4444" : txStage === "success" ? "#10B981" : "#5840FF"}`,
+              boxShadow: "0 8px 30px rgba(0, 0, 0, 0.4)",
+              color: "#FFFFFF",
+            }}
+          >
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "0.75rem" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: "0.6rem", fontWeight: 700, fontSize: "0.95rem" }}>
+                {txStage === "error" ? (
+                  <AlertTriangle style={{ width: "18px", height: "18px", color: "#EF4444" }} />
+                ) : txStage === "success" ? (
+                  <CheckCircle2 style={{ width: "18px", height: "18px", color: "#10B981" }} />
+                ) : (
+                  <RefreshCw style={{ width: "18px", height: "18px", color: "#5840FF", animation: "spin 1.2s linear infinite" }} />
+                )}
+                <span>MST Blockchain Transaction Lifecycle</span>
+              </div>
+              {(txStage === "success" || txStage === "error") && (
+                <button
+                  onClick={() => setTxStage("idle")}
+                  style={{ background: "transparent", border: "none", color: "#94A3B8", cursor: "pointer", fontSize: "1.2rem", lineHeight: 1 }}
+                >
+                  ×
+                </button>
+              )}
+            </div>
+
+            {/* Visual 5-Step Process */}
+            <div
+              style={{
+                display: "grid",
+                gridTemplateColumns: "repeat(5, 1fr)",
+                gap: "0.5rem",
+                marginBottom: "0.75rem",
+                fontSize: "0.72rem",
+                fontFamily: "var(--font-mono)",
+                textAlign: "center",
+              }}
+            >
+              {[
+                { num: 1, label: "1. Requested" },
+                { num: 2, label: "2. Signed" },
+                { num: 3, label: "3. Broadcast" },
+                { num: 4, label: "4. Confirmed" },
+                { num: 5, label: "5. Refreshed" },
+              ].map((step) => {
+                const currentNum =
+                  txStage === "requesting" ? 1 :
+                  txStage === "signing" ? 2 :
+                  txStage === "broadcasting" ? 3 :
+                  txStage === "confirming" ? 4 :
+                  txStage === "success" ? 5 : 0;
+                const isDone = currentNum > step.num || txStage === "success";
+                const isActive = currentNum === step.num;
+                return (
+                  <div
+                    key={step.num}
+                    style={{
+                      padding: "0.35rem 0.2rem",
+                      borderRadius: "6px",
+                      backgroundColor: isDone ? "rgba(16, 185, 129, 0.15)" : isActive ? "rgba(88, 64, 255, 0.2)" : "rgba(255, 255, 255, 0.04)",
+                      border: `1px solid ${isDone ? "#10B981" : isActive ? "#5840FF" : "transparent"}`,
+                      color: isDone ? "#10B981" : isActive ? "#5840FF" : "#94A3B8",
+                      fontWeight: isActive || isDone ? 700 : 500,
+                    }}
+                  >
+                    {isDone ? `✓ ${step.label.slice(3)}` : step.label}
+                  </div>
+                );
+              })}
+            </div>
+
+            <div style={{ fontSize: "0.85rem", color: "#CBD5E1" }}>
+              {txStageMessage}
+            </div>
+
+            {activeTxHash && (
+              <div style={{ marginTop: "0.5rem", fontSize: "0.8rem" }}>
+                <a
+                  href={`https://testnet.mstscan.com/tx/${activeTxHash}`}
+                  target="_blank"
+                  rel="noreferrer"
+                  style={{ color: "#5840FF", textDecoration: "underline", display: "inline-flex", alignItems: "center", gap: "4px" }}
+                >
+                  <span>View on MST Explorer ({activeTxHash.slice(0, 14)}...)</span>
+                  <ExternalLink style={{ width: "12px", height: "12px" }} />
+                </a>
+              </div>
+            )}
+          </div>
+        )}
+
         {/* Status notification toast */}
         {statusMessage && (
           <div
@@ -821,19 +2404,6 @@ export const App: React.FC = () => {
             </button>
           </div>
         )}
-
-        {/* Honest Architectural Boundary Banner */}
-        <div className="disclaimer-banner">
-          <div className="disclaimer-icon">
-            <AlertTriangle style={{ width: "20px", height: "20px", color: "var(--accent-amber)" }} />
-          </div>
-          <div className="disclaimer-text">
-            <strong>Honest Architectural Boundary:</strong> A receipt confirmation is a{" "}
-            <strong>subjective member governance decision (social consensus)</strong>, not cryptographic
-            proof that an off-chain purchase actually occurred. The smart contract validates voting thresholds,
-            reserved funds, and timeout state transitions; it cannot independently inspect off-chain physical commerce.
-          </div>
-        </div>
 
         {/* Vault Header Card */}
         <section
@@ -892,11 +2462,162 @@ export const App: React.FC = () => {
                   </a>
                 </span>
                 <span>•</span>
-                <span>MST Blockchain (Chain ID 91562037)</span>
+                <span
+                  style={{
+                    padding: "0.2rem 0.5rem",
+                    borderRadius: "4px",
+                    fontSize: "0.75rem",
+                    fontWeight: 600,
+                    background:
+                      vaultAddress.toLowerCase() === CONTRACT_ADDRESSES.GenesisVault?.toLowerCase()
+                        ? "rgba(59, 130, 246, 0.15)"
+                        : vaultAddress.toLowerCase() === CONTRACT_ADDRESSES.testRelayerVault2of2?.toLowerCase()
+                        ? "rgba(245, 158, 11, 0.15)"
+                        : "rgba(16, 185, 129, 0.15)",
+                    color:
+                      vaultAddress.toLowerCase() === CONTRACT_ADDRESSES.GenesisVault?.toLowerCase()
+                        ? "var(--accent-primary)"
+                        : vaultAddress.toLowerCase() === CONTRACT_ADDRESSES.testRelayerVault2of2?.toLowerCase()
+                        ? "#f59e0b"
+                        : "var(--accent-emerald)",
+                    border:
+                      vaultAddress.toLowerCase() === CONTRACT_ADDRESSES.GenesisVault?.toLowerCase()
+                        ? "1px solid rgba(59, 130, 246, 0.3)"
+                        : vaultAddress.toLowerCase() === CONTRACT_ADDRESSES.testRelayerVault2of2?.toLowerCase()
+                        ? "1px solid rgba(245, 158, 11, 0.3)"
+                        : "1px solid rgba(16, 185, 129, 0.3)",
+                  }}
+                >
+                  {currentChainId === MST_MAINNET_CONFIG.chainId
+                    ? "MST Mainnet Genesis (2-of-2 Multisig)"
+                    : vaultAddress.toLowerCase() === CONTRACT_ADDRESSES.GenesisVault?.toLowerCase()
+                    ? "V1 Genesis Vault"
+                    : vaultAddress.toLowerCase() === CONTRACT_ADDRESSES.testRelayerVault2of2?.toLowerCase()
+                    ? "2-of-2 Test Vault (Gasless Verified)"
+                    : "ClubVault V2 (Gasless-Enabled)"}
+                </span>
+                <span>•</span>
+                <span>MST Blockchain (Chain ID {currentChainId})</span>
               </div>
             </div>
 
-            <div style={{ display: "flex", gap: "0.5rem" }}>
+            <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap", alignItems: "center" }}>
+              {/* Vault Selector Pills */}
+              <div style={{ display: "flex", gap: "0.3rem", background: "rgba(255,255,255,0.04)", padding: "0.25rem", borderRadius: "8px", border: "1px solid var(--border-color)" }}>
+                {CONTRACT_ADDRESSES.GenesisVault && (
+                  <button
+                    id="btn-select-v1-vault"
+                    onClick={() => {
+                      setVaultAddress(CONTRACT_ADDRESSES.GenesisVault!);
+                      syncOnChainVault(CONTRACT_ADDRESSES.GenesisVault!);
+                    }}
+                    style={{
+                      padding: "0.4rem 0.7rem",
+                      fontSize: "0.78rem",
+                      borderRadius: "6px",
+                      border: "none",
+                      cursor: "pointer",
+                      background: vaultAddress.toLowerCase() === CONTRACT_ADDRESSES.GenesisVault?.toLowerCase() ? "var(--accent-primary)" : "transparent",
+                      color: vaultAddress.toLowerCase() === CONTRACT_ADDRESSES.GenesisVault?.toLowerCase() ? "#fff" : "var(--text-secondary)",
+                      fontWeight: 600,
+                    }}
+                  >
+                    V1 Genesis
+                  </button>
+                )}
+                {CONTRACT_ADDRESSES.GenesisVaultV2 && (
+                  <button
+                    id="btn-select-v2-vault"
+                    onClick={() => {
+                      setVaultAddress(CONTRACT_ADDRESSES.GenesisVaultV2!);
+                      syncOnChainVault(CONTRACT_ADDRESSES.GenesisVaultV2!);
+                    }}
+                    style={{
+                      padding: "0.4rem 0.7rem",
+                      fontSize: "0.78rem",
+                      borderRadius: "6px",
+                      border: "none",
+                      cursor: "pointer",
+                      background: vaultAddress.toLowerCase() === CONTRACT_ADDRESSES.GenesisVaultV2?.toLowerCase() ? "var(--accent-emerald)" : "transparent",
+                      color: vaultAddress.toLowerCase() === CONTRACT_ADDRESSES.GenesisVaultV2?.toLowerCase() ? "#fff" : "var(--text-secondary)",
+                      fontWeight: 600,
+                    }}
+                  >
+                    V2 Genesis
+                  </button>
+                )}
+                {CONTRACT_ADDRESSES.testRelayerVault2of2 && (
+                  <button
+                    id="btn-select-2of2-vault"
+                    onClick={() => {
+                      setVaultAddress(CONTRACT_ADDRESSES.testRelayerVault2of2!);
+                      syncOnChainVault(CONTRACT_ADDRESSES.testRelayerVault2of2!);
+                    }}
+                    style={{
+                      padding: "0.4rem 0.7rem",
+                      fontSize: "0.78rem",
+                      borderRadius: "6px",
+                      border: "none",
+                      cursor: "pointer",
+                      background: vaultAddress.toLowerCase() === CONTRACT_ADDRESSES.testRelayerVault2of2?.toLowerCase() ? "#f59e0b" : "transparent",
+                      color: vaultAddress.toLowerCase() === CONTRACT_ADDRESSES.testRelayerVault2of2?.toLowerCase() ? "#000" : "var(--text-secondary)",
+                      fontWeight: 600,
+                    }}
+                  >
+                    2-of-2 Test Vault
+                  </button>
+                )}
+              </div>
+              <button
+                id="btn-refresh-treasury-state"
+                onClick={() => syncOnChainVault()}
+                className="btn btn-secondary"
+                style={{ padding: "0.6rem 1rem", fontSize: "0.85rem" }}
+                title="Refresh treasury metrics and proposal states from the contract"
+                disabled={isSyncingContract}
+              >
+                <RefreshCw
+                  style={{
+                    width: "15px",
+                    height: "15px",
+                    color: "var(--accent-crimson)",
+                    animation: isSyncingContract ? "spin 1s linear infinite" : "none",
+                  }}
+                />
+                <span>{isSyncingContract ? "Syncing..." : "Refresh State"}</span>
+              </button>
+
+              <button
+                onClick={exportLedgerToCSV}
+                className="btn btn-secondary"
+                style={{ padding: "0.6rem 1rem", fontSize: "0.85rem" }}
+                title="Download CSV audit ledger of all proposals and transactions"
+              >
+                <Download style={{ width: "15px", height: "15px", color: "var(--accent-emerald)" }} />
+                <span>Export CSV</span>
+              </button>
+
+              <button
+                id="btn-open-deposit-header"
+                className="btn btn-primary"
+                onClick={() => {
+                  setActiveTab("deposit");
+                  setTimeout(() => {
+                    const el = document.getElementById("deposit-amount-input");
+                    el?.scrollIntoView({ behavior: "smooth", block: "center" });
+                    el?.focus();
+                  }, 50);
+                }}
+                style={{
+                  background: "linear-gradient(135deg, #10B981 0%, #059669 100%)",
+                  borderColor: "#10B981",
+                  boxShadow: "0 4px 14px rgba(16, 185, 129, 0.25)",
+                }}
+              >
+                <ArrowDownLeft style={{ width: "16px", height: "16px" }} />
+                <span>Deposit Funds</span>
+              </button>
+
               <button
                 id="open-create-proposal-btn"
                 className="btn btn-primary"
@@ -908,6 +2629,25 @@ export const App: React.FC = () => {
             </div>
           </div>
         </section>
+
+        {/* Actionable 'Needs Your Attention' Inbox */}
+        <ActionInbox
+          proposals={proposals}
+          account={account}
+          onSelectProposal={(id) => {
+            const found = proposals.find((p) => p.id === id);
+            if (found) {
+              setSelectedProposalForDetail(found);
+            }
+          }}
+          onFilterStatus={(st) => {
+            setStatusFilter(st);
+            setActiveTab("proposals");
+          }}
+          onGaslessVote={(p) => setGaslessVoteProposal(p)}
+          onExecuteProposal={handleExecuteProposal}
+          requiredApprovals={requiredApprovals}
+        />
 
         {/* Smart Contract Invariant Verification Bar */}
         <div
@@ -972,18 +2712,47 @@ export const App: React.FC = () => {
 
         {/* Treasury Metrics Grid */}
         <section className="metrics-grid">
-          <div className="metric-card">
-            <div className="metric-label">Total Vault Balance</div>
-            <div className="metric-value">
-              {vaultBalance} <span style={{ fontSize: "1rem", color: "var(--accent-crimson)" }}>tMSTC</span>
+          <div className="metric-card" style={{ display: "flex", flexDirection: "column", justifyContent: "space-between" }}>
+            <div>
+              <div className="metric-label">Total Vault Balance</div>
+              <div className="metric-value">
+                {vaultBalance} <span style={{ fontSize: "1rem", color: "var(--accent-crimson)" }}>{currencySymbol}</span>
+              </div>
+              <div className="metric-sub">On-chain native balance</div>
             </div>
-            <div className="metric-sub">On-chain native balance</div>
+            <button
+              id="metric-btn-deposit"
+              onClick={() => {
+                setActiveTab("deposit");
+                setTimeout(() => {
+                  const el = document.getElementById("deposit-amount-input");
+                  el?.scrollIntoView({ behavior: "smooth", block: "center" });
+                  el?.focus();
+                }, 50);
+              }}
+              className="btn btn-secondary"
+              style={{
+                marginTop: "0.6rem",
+                padding: "0.3rem 0.65rem",
+                fontSize: "0.75rem",
+                alignSelf: "flex-start",
+                color: "var(--accent-emerald)",
+                borderColor: "rgba(16, 185, 129, 0.35)",
+                background: "rgba(16, 185, 129, 0.08)",
+                display: "inline-flex",
+                alignItems: "center",
+                gap: "0.35rem",
+              }}
+            >
+              <ArrowDownLeft style={{ width: "12px", height: "12px" }} />
+              <span>+ Deposit {currencySymbol}</span>
+            </button>
           </div>
 
           <div className="metric-card">
             <div className="metric-label" style={{ color: "var(--accent-emerald)" }}>Available to Propose</div>
             <div className="metric-value" style={{ color: "var(--accent-emerald)" }}>
-              {availableFunds} <span style={{ fontSize: "1rem" }}>tMSTC</span>
+              {availableFunds} <span style={{ fontSize: "1rem" }}>{currencySymbol}</span>
             </div>
             <div className="metric-sub">Balance minus reserved</div>
           </div>
@@ -991,7 +2760,7 @@ export const App: React.FC = () => {
           <div className="metric-card">
             <div className="metric-label" style={{ color: "var(--accent-amber)" }}>Reserved (Approved)</div>
             <div className="metric-value" style={{ color: "var(--accent-amber)" }}>
-              {reservedFunds} <span style={{ fontSize: "1rem" }}>tMSTC</span>
+              {reservedFunds} <span style={{ fontSize: "1rem" }}>{currencySymbol}</span>
             </div>
             <div className="metric-sub">Locked for approved disbursements</div>
           </div>
@@ -999,7 +2768,7 @@ export const App: React.FC = () => {
           <div className="metric-card">
             <div className="metric-label" style={{ color: "#FF8088" }}>Advances Paid Out</div>
             <div className="metric-value" style={{ color: "#FF8088" }}>
-              {unconfirmedAdvances} <span style={{ fontSize: "1rem" }}>tMSTC</span>
+              {unconfirmedAdvances} <span style={{ fontSize: "1rem" }}>{currencySymbol}</span>
             </div>
             <div className="metric-sub">Advances already paid — awaiting receipt confirmation</div>
           </div>
@@ -1042,7 +2811,7 @@ export const App: React.FC = () => {
             className={`tab-btn ${activeTab === "transactions" ? "active" : ""}`}
             onClick={() => setActiveTab("transactions")}
           >
-            Transactions ({transactions.length})
+            Transactions ({displayedTransactions.length})
           </button>
         </div>
 
@@ -1118,6 +2887,7 @@ export const App: React.FC = () => {
 
                   return (
                     <div
+                      id={`proposal-card-${p.id}`}
                       key={p.id}
                       className="proposal-item"
                       style={{ cursor: "pointer" }}
@@ -1211,30 +2981,90 @@ export const App: React.FC = () => {
                               <button
                                 id={`vote-yes-${p.id}`}
                                 className="btn btn-success"
+                                disabled={txStage !== "idle"}
                                 onClick={() => handleVoteProposal(p.id, true)}
+                                title="Direct On-Chain Vote (Requires Gas)"
+                                style={{ minWidth: "95px", display: "inline-flex", alignItems: "center", justifyContent: "center", gap: "0.4rem" }}
                               >
-                                Approve
+                                {votingProposalId === p.id && (txStage === "requesting" || txStage === "signing") ? (
+                                  <>
+                                    <RefreshCw style={{ width: "13px", height: "13px", animation: "spin 1.2s linear infinite" }} />
+                                    <span>Confirming...</span>
+                                  </>
+                                ) : (
+                                  "Approve"
+                                )}
                               </button>
                               <button
                                 id={`vote-no-${p.id}`}
                                 className="btn btn-danger"
+                                disabled={txStage !== "idle"}
                                 onClick={() => handleVoteProposal(p.id, false)}
+                                title="Direct On-Chain Vote (Requires Gas)"
+                                style={{ minWidth: "90px", display: "inline-flex", alignItems: "center", justifyContent: "center", gap: "0.4rem" }}
                               >
-                                Reject
+                                {votingProposalId === p.id && (txStage === "requesting" || txStage === "signing") ? (
+                                  <>
+                                    <RefreshCw style={{ width: "13px", height: "13px", animation: "spin 1.2s linear infinite" }} />
+                                    <span>Confirming...</span>
+                                  </>
+                                ) : (
+                                  "Reject"
+                                )}
+                              </button>
+                              <button
+                                id={`vote-gasless-${p.id}`}
+                                className="btn btn-secondary"
+                                style={{
+                                  border: "1px solid var(--accent-emerald)",
+                                  color: "var(--accent-emerald)",
+                                  display: "inline-flex",
+                                  alignItems: "center",
+                                  gap: "0.35rem",
+                                  padding: "0.45rem 0.75rem",
+                                  fontSize: "0.8rem",
+                                  fontWeight: "600",
+                                }}
+                                onClick={() => setGaslessVoteProposal(p)}
+                                title="Gas-Sponsored Vote via EIP-712 Relayer (0 Gas for Voter)"
+                              >
+                                <Fuel style={{ width: "13px", height: "13px" }} />
+                                <span>Gasless Vote</span>
                               </button>
                             </>
                           )}
 
                           {p.status === ProposalStatus.APPROVED && (
-                            <button
-                              id={`execute-btn-${p.id}`}
-                              className="btn btn-primary"
-                              onClick={() => handleExecuteProposal(p.id)}
-                            >
-                              {p.proposalType === ProposalType.ADVANCE_PAYMENT
-                                ? `Release Advance (${p.amount} tMSTC)`
-                                : `Execute Disbursement (${p.amount} tMSTC)`}
-                            </button>
+                            <>
+                              <button
+                                id={`execute-btn-${p.id}`}
+                                className="btn btn-primary"
+                                disabled={txStage !== "idle"}
+                                onClick={() => handleExecuteProposal(p.id)}
+                                style={{ display: "inline-flex", alignItems: "center", gap: "0.4rem" }}
+                              >
+                                {txStage === "requesting" || txStage === "signing" ? (
+                                  <>
+                                    <RefreshCw style={{ width: "14px", height: "14px", animation: "spin 1.2s linear infinite" }} />
+                                    <span>Confirming in Wallet...</span>
+                                  </>
+                                ) : (
+                                  p.proposalType === ProposalType.ADVANCE_PAYMENT
+                                    ? `Release Advance (${p.amount} tMSTC)`
+                                    : `Execute Disbursement (${p.amount} tMSTC)`
+                                )}
+                              </button>
+                              {p.executionDeadline && Date.now() / 1000 > p.executionDeadline && (
+                                <button
+                                  id={`expire-btn-${p.id}`}
+                                  className="btn btn-danger"
+                                  onClick={() => handleExpireProposal(p.id)}
+                                  title="Release reserved funds back to treasury"
+                                >
+                                  Expire & Release Funds
+                                </button>
+                              )}
+                            </>
                           )}
 
                           {p.status === ProposalStatus.ADVANCE_DISBURSED && (
@@ -1251,16 +3081,26 @@ export const App: React.FC = () => {
                           )}
 
                           {p.txHash && (
-                            <a
-                              href={`https://testnet.mstscan.com/tx/${p.txHash}`}
-                              target="_blank"
-                              rel="noreferrer"
-                              className="address-tag"
-                              title="View on MST Scan"
-                            >
-                              <span>Tx: {p.txHash.slice(0, 6)}...</span>
-                              <ExternalLink style={{ width: "12px", height: "12px" }} />
-                            </a>
+                            p.txHash.startsWith("0x") ? (
+                              <a
+                                href={`https://testnet.mstscan.com/tx/${p.txHash}`}
+                                target="_blank"
+                                rel="noreferrer"
+                                className="address-tag"
+                                title="View on MST Scan"
+                              >
+                                <span>Tx: {p.txHash.slice(0, 6)}...</span>
+                                <ExternalLink style={{ width: "12px", height: "12px" }} />
+                              </a>
+                            ) : (
+                              <span
+                                className="address-tag"
+                                style={{ opacity: 0.85, cursor: "default" }}
+                                title="Transaction recorded in local demo simulation mode"
+                              >
+                                <span>Simulated</span>
+                              </span>
+                            )
                           )}
                         </div>
                       </div>
@@ -1471,33 +3311,192 @@ export const App: React.FC = () => {
 
         {/* Tab 4: Deposit & Fund Treasury */}
         {activeTab === "deposit" && (
-          <div className="glass-panel" style={{ padding: "2.25rem", maxWidth: "600px", margin: "0 auto" }}>
+          <div className="glass-panel" style={{ padding: "2.25rem", maxWidth: "620px", margin: "0 auto" }}>
             <h3 style={{ fontFamily: "var(--font-heading)", fontSize: "1.35rem", marginBottom: "0.5rem", color: "var(--text-primary)" }}>
               Deposit Funds to Club Treasury
             </h3>
-            <p style={{ color: "var(--text-secondary)", fontSize: "0.9rem", marginBottom: "1.5rem", lineHeight: 1.6 }}>
-              Anyone can contribute native tokens (tMSTC) to the vault. Contributed funds immediately increase
+            <p style={{ color: "var(--text-secondary)", fontSize: "0.9rem", marginBottom: "1.25rem", lineHeight: 1.6 }}>
+              Anyone can contribute native tokens ({currencySymbol}) to the vault. Contributed funds immediately increase
               Available Funds and can be proposed for grants and projects.
             </p>
 
+            {/* Quick preset amount buttons */}
+            <div style={{ marginBottom: "1rem" }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "0.4rem" }}>
+                <span style={{ fontSize: "0.78rem", color: "var(--text-muted)" }}>
+                  Quick Preset Amounts:
+                </span>
+                {account && (
+                  <span style={{ fontSize: "0.75rem", color: "var(--text-secondary)" }}>
+                    Wallet Balance: <strong style={{ color: "var(--accent-emerald)" }}>{accountBalance} {currencySymbol}</strong>
+                  </span>
+                )}
+              </div>
+              <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap", alignItems: "center" }}>
+                {["0.1", "0.5", "1.0", "2.0"].map((preset) => (
+                  <button
+                    key={preset}
+                    type="button"
+                    onClick={() => {
+                      setFormDepositAmount(preset);
+                      setDepositInputError(null);
+                    }}
+                    className="btn btn-secondary"
+                    style={{
+                      padding: "0.3rem 0.65rem",
+                      fontSize: "0.78rem",
+                      borderColor: formDepositAmount === preset ? "var(--accent-emerald)" : "var(--border-subtle)",
+                      color: formDepositAmount === preset ? "#FFFFFF" : "var(--text-secondary)",
+                      background: formDepositAmount === preset ? "rgba(16, 185, 129, 0.15)" : "rgba(255, 255, 255, 0.03)",
+                    }}
+                  >
+                    {preset} {currencySymbol}
+                  </button>
+                ))}
+                {account && parseFloat(accountBalance || "0") > 0.02 && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const safeMax = Math.max(0, parseFloat(accountBalance) - 0.01).toFixed(3);
+                      setFormDepositAmount(safeMax);
+                      setDepositInputError(null);
+                    }}
+                    className="btn btn-secondary"
+                    style={{
+                      padding: "0.3rem 0.65rem",
+                      fontSize: "0.78rem",
+                      borderColor: "rgba(16, 185, 129, 0.4)",
+                      color: "var(--accent-emerald)",
+                      background: "rgba(16, 185, 129, 0.1)",
+                      fontWeight: 600,
+                    }}
+                    title="Deposit max balance while keeping 0.01 reserve for gas"
+                  >
+                    Max Safe ({(parseFloat(accountBalance) - 0.01).toFixed(3)} {currencySymbol})
+                  </button>
+                )}
+              </div>
+            </div>
+
             <form onSubmit={handleDeposit}>
-              <div className="form-group">
-                <label className="form-label">Deposit Amount (tMSTC)</label>
+              <div className="form-group" style={{ marginBottom: "1rem" }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "0.35rem" }}>
+                  <label className="form-label" style={{ margin: 0 }}>Deposit Amount ({currencySymbol})</label>
+                  {formDepositAmount && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setFormDepositAmount("");
+                        setDepositInputError(null);
+                      }}
+                      style={{
+                        background: "none",
+                        border: "none",
+                        color: "var(--text-muted)",
+                        fontSize: "0.75rem",
+                        cursor: "pointer",
+                        padding: 0,
+                        textDecoration: "underline",
+                      }}
+                    >
+                      Clear Amount
+                    </button>
+                  )}
+                </div>
                 <input
                   id="deposit-amount-input"
-                  type="number"
-                  step="0.01"
-                  min="0.01"
+                  type="text"
+                  inputMode="decimal"
                   className="form-control"
-                  placeholder="e.g. 5.0"
+                  placeholder="e.g. 0.1 or 1.0"
                   value={formDepositAmount}
-                  onChange={(e) => setFormDepositAmount(e.target.value)}
+                  onChange={(e) => {
+                    setFormDepositAmount(e.target.value);
+                    if (depositInputError) setDepositInputError(null);
+                  }}
+                  style={{
+                    borderColor: depositInputError ? "var(--accent-crimson)" : undefined,
+                  }}
                   required
                 />
+                {depositInputError && (
+                  <div style={{ color: "var(--accent-crimson)", fontSize: "0.78rem", marginTop: "0.35rem" }}>
+                    {depositInputError}
+                  </div>
+                )}
               </div>
 
-              <button id="submit-deposit-btn" type="submit" className="btn btn-primary" style={{ width: "100%", padding: "0.85rem" }}>
-                Deposit to Treasury
+              {/* Pre-Submission Summary Card */}
+              <div
+                style={{
+                  padding: "1rem",
+                  borderRadius: "var(--radius-sm)",
+                  background: "rgba(255, 255, 255, 0.03)",
+                  border: "1px solid var(--border-subtle)",
+                  marginBottom: "1.25rem",
+                  fontSize: "0.82rem",
+                  fontFamily: "var(--font-mono)",
+                }}
+              >
+                <div style={{ fontWeight: 700, color: "var(--text-primary)", marginBottom: "0.5rem", fontSize: "0.85rem" }}>
+                  Pre-Submission Summary
+                </div>
+                <div style={{ display: "flex", justifyContent: "space-between", marginBottom: "0.3rem" }}>
+                  <span style={{ color: "var(--text-muted)" }}>Exact Amount:</span>
+                  <span style={{ fontWeight: 700, color: "var(--accent-emerald)" }}>
+                    {formDepositAmount.trim() ? `${formDepositAmount.trim()} ${currencySymbol}` : `0.0 ${currencySymbol}`}
+                  </span>
+                </div>
+                <div style={{ display: "flex", justifyContent: "space-between", marginBottom: "0.3rem" }}>
+                  <span style={{ color: "var(--text-muted)" }}>Target Chain ID:</span>
+                  <span style={{ color: "var(--text-secondary)" }}>{currentChainId} ({currentChainId === 4646 ? "MST Mainnet" : "MST Testnet"})</span>
+                </div>
+                <div style={{ display: "flex", flexDirection: "column", gap: "2px", marginBottom: "0.3rem" }}>
+                  <span style={{ color: "var(--text-muted)" }}>Destination Vault Contract:</span>
+                  <a
+                    href={(currentChainId === 4646 ? "https://mstscan.com" : "https://testnet.mstscan.com") + `/address/${vaultAddress}`}
+                    target="_blank"
+                    rel="noreferrer"
+                    style={{ color: "var(--accent-crimson)", wordBreak: "break-all", fontSize: "0.75rem", textDecoration: "none" }}
+                    title="View destination contract on MSTScan"
+                  >
+                    {vaultAddress} ↗
+                  </a>
+                </div>
+                <div style={{ display: "flex", justifyContent: "space-between", marginBottom: "0.5rem" }}>
+                  <span style={{ color: "var(--text-muted)" }}>Contract Method:</span>
+                  <span style={{ color: "var(--text-secondary)" }}>deposit() (0xd0e30db0)</span>
+                </div>
+                <div
+                  style={{
+                    padding: "0.5rem",
+                    borderRadius: "4px",
+                    background: "rgba(245, 158, 11, 0.08)",
+                    border: "1px solid rgba(245, 158, 11, 0.25)",
+                    color: "#F59E0B",
+                    fontSize: "0.72rem",
+                    lineHeight: 1.4,
+                  }}
+                >
+                  ⚠️ <strong>Wallet Notice:</strong> BridgeKey may warn that the contract function is unrecognized because source code on MSTScan is unverified. Please verify the destination address above matches your Genesis Vault before approving.
+                </div>
+              </div>
+
+              <button
+                id="submit-deposit-btn"
+                type="submit"
+                className="btn btn-primary"
+                style={{
+                  width: "100%",
+                  padding: "0.85rem",
+                  background: "linear-gradient(135deg, #10B981 0%, #059669 100%)",
+                  borderColor: "#10B981",
+                  boxShadow: "0 4px 14px rgba(16, 185, 129, 0.25)",
+                }}
+              >
+                {formDepositAmount.trim() && validateDepositInput(formDepositAmount).isValid
+                  ? `Deposit ${formDepositAmount.trim()} tMSTC to Treasury`
+                  : "Deposit to Treasury"}
               </button>
             </form>
           </div>
@@ -1506,129 +3505,177 @@ export const App: React.FC = () => {
         {/* Tab 5: Transactions History */}
         {activeTab === "transactions" && (
           <div id="transactions" className="glass-panel" style={{ padding: "1.75rem" }}>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "1.5rem" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "1.5rem", flexWrap: "wrap", gap: "1rem" }}>
               <div>
                 <h3 style={{ fontFamily: "var(--font-heading)", fontSize: "1.35rem", color: "var(--text-primary)" }}>
-                  On-Chain Transaction History
+                  {isContractDeployedOnChain ? "On-Chain Transaction History" : "Simulated Transaction History"}
                 </h3>
                 <p style={{ fontSize: "0.8rem", color: "var(--text-muted)", marginTop: "2px" }}>
-                  Verifiable ledger recordings on MST Blockchain testnet
+                  {isContractDeployedOnChain
+                    ? "Verifiable ledger recordings on MST Blockchain testnet (Chain ID 91562037)"
+                    : "Simulated execution records for local demo mode"}
                 </p>
               </div>
-              <span className="cv-badge cv-badge-neutral">
-                {transactions.length} Records
-              </span>
+              <div style={{ display: "flex", alignItems: "center", gap: "0.75rem", flexWrap: "wrap" }}>
+                <button
+                  onClick={exportLedgerToCSV}
+                  className="btn btn-secondary"
+                  style={{ padding: "0.45rem 0.85rem", fontSize: "0.78rem" }}
+                  title={
+                    isContractDeployedOnChain
+                      ? "Export verifiable on-chain ledger records to CSV"
+                      : "Export simulated demo ledger records to CSV"
+                  }
+                >
+                  <Download style={{ width: "13px", height: "13px", color: "var(--accent-emerald)" }} />
+                  <span>Download Ledger CSV</span>
+                </button>
+                <span className="cv-badge cv-badge-neutral">
+                  {displayedTransactions.length} Records
+                </span>
+              </div>
             </div>
 
-            <div style={{ overflowX: "auto" }}>
-              <table className="tx-table">
-                <thead>
-                  <tr>
-                    <th>Type</th>
-                    <th>Amount</th>
-                    <th>Target Wallet</th>
-                    <th>Transaction Hash</th>
-                    <th>Time</th>
-                    <th style={{ textAlign: "right" }}>Status</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {transactions.map((tx) => (
-                    <tr key={tx.id}>
-                      <td style={{ color: "var(--text-primary)", fontWeight: 600 }}>
-                        {tx.type.replace(/_/g, " ")}
-                      </td>
-                      <td style={{ color: "var(--accent-crimson)", fontWeight: 700 }}>
-                        {tx.amount}
-                      </td>
-                      <td style={{ color: "var(--text-secondary)" }}>
-                        {tx.fromOrTo.slice(0, 6)}...{tx.fromOrTo.slice(-4)}
-                      </td>
-                      <td>
-                        <a
-                          href={`https://testnet.mstscan.com/tx/${tx.txHash}`}
-                          target="_blank"
-                          rel="noreferrer"
-                          className="address-tag"
-                        >
-                          <span>{tx.txHash.slice(0, 8)}...</span>
-                          <ExternalLink style={{ width: "12px", height: "12px" }} />
-                        </a>
-                      </td>
-                      <td style={{ color: "var(--text-muted)" }}>
-                        {new Date(tx.timestamp * 1000).toLocaleTimeString()}
-                      </td>
-                      <td style={{ textAlign: "right" }}>
-                        <span
-                          style={{
-                            padding: "0.2rem 0.55rem",
-                            borderRadius: "var(--radius-sm)",
-                            fontSize: "0.72rem",
-                            background: "var(--accent-emerald-dim)",
-                            color: "var(--accent-emerald)",
-                            border: "1px solid rgba(16, 185, 129, 0.3)",
-                            fontWeight: 700,
-                          }}
-                        >
-                          {tx.status}
-                        </span>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
+            {/* RPC sync warning if event query failed */}
+            {isContractDeployedOnChain && transactionsSyncError && (
+              <div
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "space-between",
+                  padding: "0.75rem 1rem",
+                  marginBottom: "1rem",
+                  borderRadius: "var(--radius-sm)",
+                  background: "rgba(239, 68, 68, 0.12)",
+                  border: "1px solid rgba(239, 68, 68, 0.3)",
+                  color: "#EF4444",
+                  fontSize: "0.82rem",
+                }}
+              >
+                <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+                  <AlertTriangle style={{ width: "16px", height: "16px", flexShrink: 0 }} />
+                  <span>
+                    Unable to query on-chain transaction logs via RPC ({transactionsSyncError}). Recorded session transactions are preserved.
+                  </span>
+                </div>
+                <button
+                  onClick={() => syncOnChainVault()}
+                  className="btn btn-secondary"
+                  style={{ padding: "0.25rem 0.65rem", fontSize: "0.72rem" }}
+                >
+                  Retry Sync
+                </button>
+              </div>
+            )}
+
+            {/* Syncing indicator */}
+            {isSyncingTransactions && (
+              <div style={{ padding: "2rem", textAlign: "center", color: "var(--text-muted)", fontSize: "0.85rem" }}>
+                <RefreshCw style={{ width: "20px", height: "20px", margin: "0 auto 0.5rem", animation: "spin 1s linear infinite", color: "var(--accent-crimson)" }} />
+                <div>Verifying on-chain ledger records on MST Blockchain...</div>
+              </div>
+            )}
+
+            {/* Empty state when 0 transactions */}
+            {!isSyncingTransactions && displayedTransactions.length === 0 ? (
+              <div
+                style={{
+                  padding: "3.5rem 1.5rem",
+                  textAlign: "center",
+                  borderRadius: "var(--radius-sm)",
+                  background: "var(--bg-surface-elevated)",
+                  border: "1px dashed var(--border-subtle)",
+                }}
+              >
+                <Clock style={{ width: "32px", height: "32px", margin: "0 auto 0.75rem", opacity: 0.6, color: "var(--accent-crimson)" }} />
+                <h4 style={{ fontSize: "1.05rem", color: "var(--text-primary)", fontWeight: 600, marginBottom: "0.35rem" }}>
+                  {isContractDeployedOnChain ? "No On-Chain Transactions Recorded Yet" : "No Simulated Transactions"}
+                </h4>
+                <p style={{ fontSize: "0.84rem", maxWidth: "480px", margin: "0 auto", color: "var(--text-muted)", lineHeight: 1.5 }}>
+                  {isContractDeployedOnChain
+                    ? "This ClubVault treasury currently has 0 recorded deposits or disbursements on MST Testnet (Chain ID 91562037). Live deposits and executed disbursements will appear here automatically with verified block explorer links."
+                    : "No transactions recorded in offline demo simulation mode yet."}
+                </p>
+              </div>
+            ) : (
+              !isSyncingTransactions && (
+                <div style={{ overflowX: "auto" }}>
+                  <table className="tx-table">
+                    <thead>
+                      <tr>
+                        <th>Type</th>
+                        <th>Amount</th>
+                        <th>Target Wallet</th>
+                        <th>Transaction Hash</th>
+                        <th>Time</th>
+                        <th style={{ textAlign: "right" }}>Status</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {displayedTransactions.map((tx) => (
+                        <tr key={tx.id}>
+                          <td style={{ color: "var(--text-primary)", fontWeight: 600 }}>
+                            {tx.type.replace(/_/g, " ")}
+                          </td>
+                          <td style={{ color: "var(--accent-crimson)", fontWeight: 700 }}>
+                            {tx.amount}
+                          </td>
+                          <td style={{ color: "var(--text-secondary)" }}>
+                            {tx.fromOrTo ? `${tx.fromOrTo.slice(0, 6)}...${tx.fromOrTo.slice(-4)}` : "—"}
+                          </td>
+                          <td>
+                            {tx.txHash && tx.txHash.startsWith("0x") && !tx.txHash.startsWith("DEMO-") ? (
+                              <a
+                                href={`https://testnet.mstscan.com/tx/${tx.txHash}`}
+                                target="_blank"
+                                rel="noreferrer"
+                                className="address-tag"
+                                title="View on MST Scan"
+                              >
+                                <span>{tx.txHash.slice(0, 8)}...</span>
+                                <ExternalLink style={{ width: "12px", height: "12px" }} />
+                              </a>
+                            ) : (
+                              <span
+                                className="address-tag"
+                                style={{ opacity: 0.85, cursor: "default" }}
+                                title="Transaction recorded in local demo simulation mode"
+                              >
+                                <span>Simulated</span>
+                              </span>
+                            )}
+                          </td>
+                          <td style={{ color: "var(--text-muted)" }}>
+                            {new Date(tx.timestamp * 1000).toLocaleTimeString()}
+                          </td>
+                          <td style={{ textAlign: "right" }}>
+                            <span
+                              style={{
+                                padding: "0.2rem 0.55rem",
+                                borderRadius: "var(--radius-sm)",
+                                fontSize: "0.72rem",
+                                background: "var(--accent-emerald-dim)",
+                                color: "var(--accent-emerald)",
+                                border: "1px solid rgba(16, 185, 129, 0.3)",
+                                fontWeight: 700,
+                              }}
+                            >
+                              {tx.status}
+                            </span>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )
+            )}
           </div>
         )}
-      </main>
-
-      {/* Footer */}
-      <footer
-        style={{
-          marginTop: "6rem",
-          borderTop: "1px solid var(--border-subtle)",
-          padding: "3rem 2rem",
-          maxWidth: "1340px",
-          margin: "6rem auto 0 auto",
-          display: "flex",
-          justifyContent: "space-between",
-          alignItems: "center",
-          flexWrap: "wrap",
-          gap: "1.5rem",
-          fontSize: "0.82rem",
-          fontFamily: "var(--font-mono)",
-          color: "var(--text-muted)",
-        }}
-      >
-        <div style={{ display: "flex", alignItems: "center", gap: "0.75rem" }}>
-          <div style={{ width: "28px", height: "28px", borderRadius: "8px", overflow: "hidden", border: "1px solid var(--border-subtle)" }}>
-            <img src="/clubvault-emblem.jpg" alt="ClubVault" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
-          </div>
-          <span style={{ color: "var(--text-primary)", fontWeight: 700 }}>ClubVault</span>
-          <span>•</span>
-          <span>MST Blockchain Invariant Engine</span>
-        </div>
-
-        <div style={{ display: "flex", alignItems: "center", gap: "1rem" }}>
-          <a
-            href="https://testnet.mstscan.com"
-            target="_blank"
-            rel="noreferrer"
-            style={{ color: "var(--text-secondary)", textDecoration: "none" }}
-          >
-            MST Scan Explorer ↗
-          </a>
-          <span>•</span>
-          <a
-            href="https://testnetrpc.mstblockchain.com"
-            target="_blank"
-            rel="noreferrer"
-            style={{ color: "var(--text-secondary)", textDecoration: "none" }}
-          >
-            RPC Endpoint
-          </a>
-        </div>
-      </footer>
+          </main>
+          <PublicFooter onNavigate={navigateToRoute} />
+        </>
+      )}
 
       {/* Modal: Create Proposal */}
       {showCreateModal && (
@@ -1752,6 +3799,7 @@ export const App: React.FC = () => {
           requiredApprovals={requiredApprovals}
           totalMembers={members.length}
           account={account}
+          onGaslessVote={(p) => setGaslessVoteProposal(p)}
         />
       )}
 
@@ -1778,75 +3826,201 @@ export const App: React.FC = () => {
         />
       )}
 
-      {/* Modal: Factory Deploy New Vault */}
-      {showFactoryModal && (
-        <div className="modal-overlay">
-          <div className="modal-card">
-            <div className="modal-header">
-              <h3 className="modal-title">Deploy New ClubVault</h3>
-              <button className="close-btn" onClick={() => setShowFactoryModal(false)}>
+      {/* Modal: Pre-Flight Execution Confirmation */}
+      {executionConfirmProposal && (
+        <ExecutionConfirmationModal
+          isOpen={!!executionConfirmProposal}
+          onClose={() => setExecutionConfirmProposal(null)}
+          onConfirm={() => proceedExecuteProposal(executionConfirmProposal)}
+          proposal={executionConfirmProposal}
+          vaultAddress={vaultAddress}
+        />
+      )}
+
+      {/* Modal: Factory Deploy New Vault with 6 Organization Templates */}
+      <TemplateSelectorModal
+        isOpen={showFactoryModal}
+        onClose={() => setShowFactoryModal(false)}
+        onDeploy={handleDeployWithTemplate}
+        isDeploying={isDeployingVault}
+      />
+
+      {/* Modal: BridgeKey Web3 Cryptographic Key Vault */}
+      <BridgeKeyModal
+        isOpen={showBridgeKeyModal}
+        onClose={() => setShowBridgeKeyModal(false)}
+        onConnect={handleBridgeKeyConnect}
+        onDisconnect={handleBridgeKeyDisconnect}
+        currentAccount={account}
+        currentBalance={accountBalance}
+        isCorrectNetwork={isCorrectNetwork}
+        onSwitchNetwork={switchNetwork}
+      />
+
+      {/* Modal: Production MST Mainnet Deployment (Chain ID 4646) */}
+      <MainnetDeploymentModal
+        isOpen={showMainnetModal}
+        onClose={() => setShowMainnetModal(false)}
+        account={account}
+        accountBalance={accountBalance}
+        isCorrectNetwork={currentChainId === MST_MAINNET_CONFIG.chainId}
+        onSwitchToMainnet={switchToMainnet}
+        onConnectWallet={connectWallet}
+        onDeploymentComplete={(_record) => {
+          setStatusMessage("✔ Production Mainnet Deployment Completed & Recorded!");
+        }}
+      />
+
+      {/* Modal: Gas-Sponsored EIP-712 Relayed Vote */}
+      {gaslessVoteProposal && (
+        <GaslessVoteModal
+          isOpen={!!gaslessVoteProposal}
+          onClose={() => setGaslessVoteProposal(null)}
+          proposal={gaslessVoteProposal}
+          vaultAddress={vaultAddress}
+          account={account || ""}
+          isMember={!!account && members.some((m) => m.toLowerCase() === account.toLowerCase())}
+          relayerUrl={CONTRACT_ADDRESSES.relayerUrl}
+          onSuccessVote={async () => {
+            if (isContractDeployedOnChain) {
+              await syncOnChainVault();
+            }
+          }}
+          onFallbackDirectVote={(id, approve) => {
+            setGaslessVoteProposal(null);
+            handleVoteProposal(id, approve);
+          }}
+        />
+      )}
+
+      {/* Floating Viewport Transaction Tracker for 100% Visibility */}
+      {txStage !== "idle" && (
+        <div
+          id="floating-tx-tracker"
+          style={{
+            position: "fixed",
+            bottom: "28px",
+            left: "50%",
+            transform: "translateX(-50%)",
+            zIndex: 999999,
+            maxWidth: "620px",
+            width: "calc(100% - 32px)",
+            padding: "1.1rem 1.4rem",
+            borderRadius: "14px",
+            backgroundColor: "rgba(18, 19, 26, 0.98)",
+            backdropFilter: "blur(20px)",
+            border: `2px solid ${
+              txStage === "error"
+                ? "#EF4444"
+                : txStage === "success"
+                ? "#10B981"
+                : "#F59E0B"
+            }`,
+            boxShadow: "0 16px 48px rgba(0, 0, 0, 0.8), 0 0 28px rgba(245, 158, 11, 0.3)",
+            color: "#FFFFFF",
+          }}
+        >
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "0.5rem" }}>
+            <div style={{ display: "flex", alignItems: "center", gap: "0.6rem", fontWeight: 700, fontSize: "0.95rem" }}>
+              {txStage === "error" ? (
+                <AlertTriangle style={{ width: "20px", height: "20px", color: "#EF4444" }} />
+              ) : txStage === "success" ? (
+                <CheckCircle2 style={{ width: "20px", height: "20px", color: "#10B981" }} />
+              ) : (
+                <RefreshCw style={{ width: "20px", height: "20px", color: "#F59E0B", animation: "spin 1.2s linear infinite" }} />
+              )}
+              <span>
+                {txStage === "requesting" || txStage === "signing"
+                  ? "Action Required: Confirm in BridgeKey"
+                  : txStage === "broadcasting" || txStage === "confirming"
+                  ? "Broadcasting to MST Blockchain..."
+                  : txStage === "success"
+                  ? "Transaction Confirmed on-Chain!"
+                  : "Transaction Stopped"}
+              </span>
+            </div>
+            {(txStage === "success" || txStage === "error") && (
+              <button
+                onClick={() => {
+                  setTxStage("idle");
+                  setVotingProposalId(null);
+                }}
+                style={{
+                  background: "transparent",
+                  border: "none",
+                  color: "#94A3B8",
+                  cursor: "pointer",
+                  fontSize: "1.4rem",
+                  lineHeight: 1,
+                  padding: "0 4px",
+                }}
+              >
                 ×
               </button>
-            </div>
-
-            <form onSubmit={handleDeployNewVault}>
-              <div className="form-group">
-                <label className="form-label">Club / Organization Name</label>
-                <input
-                  type="text"
-                  className="form-control"
-                  placeholder="e.g. Autonomous Drone Racing Club"
-                  value={factoryClubName}
-                  onChange={(e) => setFactoryClubName(e.target.value)}
-                  required
-                />
-              </div>
-
-              <div className="form-group">
-                <label className="form-label">Club Description</label>
-                <textarea
-                  className="form-control"
-                  placeholder="Mission, team purpose, and budget governance..."
-                  value={factoryClubDesc}
-                  onChange={(e) => setFactoryClubDesc(e.target.value)}
-                  required
-                />
-              </div>
-
-              <div className="form-group">
-                <label className="form-label">Initial Members (Comma separated addresses, 1-50)</label>
-                <textarea
-                  className="form-control"
-                  placeholder="0xabc..., 0xdef..., 0x123..."
-                  value={factoryMembers}
-                  onChange={(e) => setFactoryMembers(e.target.value)}
-                  required
-                />
-              </div>
-
-              <div className="form-group">
-                <label className="form-label">Quorum Approvals Required</label>
-                <input
-                  type="number"
-                  min="1"
-                  max="50"
-                  className="form-control"
-                  value={factoryQuorum}
-                  onChange={(e) => setFactoryQuorum(parseInt(e.target.value))}
-                  required
-                />
-              </div>
-
-              <div style={{ display: "flex", justifyContent: "flex-end", gap: "0.75rem", marginTop: "1.25rem" }}>
-                <button type="button" className="btn btn-secondary" onClick={() => setShowFactoryModal(false)}>
-                  Cancel
-                </button>
-                <button type="submit" className="btn btn-primary">
-                  Deploy ClubVault Instance
-                </button>
-              </div>
-            </form>
+            )}
           </div>
+          <div style={{ fontSize: "0.85rem", color: "#E2E8F0", lineHeight: 1.4, marginBottom: "0.45rem" }}>
+            {txStageMessage}
+          </div>
+          {txStage === "error" && (isExtensionReloadRequired || txStageMessage.toLowerCase().includes("reload") || txStageMessage.toLowerCase().includes("updated") || txStageMessage.toLowerCase().includes("bridgekey")) && (
+            <div
+              style={{
+                marginTop: "0.6rem",
+                padding: "0.75rem 0.9rem",
+                backgroundColor: "rgba(239, 68, 68, 0.2)",
+                border: "1px solid rgba(239, 68, 68, 0.5)",
+                borderRadius: "8px",
+                display: "flex",
+                flexDirection: "column",
+                gap: "0.6rem",
+              }}
+            >
+              <div style={{ fontSize: "0.85rem", color: "#FCA5A5", fontWeight: 600 }}>
+                Chrome updated the BridgeKey extension in the background. Simply reload this tab so Chrome can re-attach the extension:
+              </div>
+              <button
+                id="reload-tab-btn"
+                className="btn btn-primary"
+                onClick={() => window.location.reload()}
+                style={{
+                  alignSelf: "flex-start",
+                  padding: "0.5rem 1.1rem",
+                  fontSize: "0.85rem",
+                  fontWeight: 700,
+                  background: "#EF4444",
+                  borderColor: "#DC2626",
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: "0.4rem",
+                  boxShadow: "0 0 16px rgba(239, 68, 68, 0.4)",
+                  cursor: "pointer",
+                }}
+              >
+                <RefreshCw style={{ width: "14px", height: "14px" }} />
+                <span>Reload Page Now & Reconnect</span>
+              </button>
+            </div>
+          )}
+          {(txStage === "requesting" || txStage === "signing") && (
+            <div
+              style={{
+                fontSize: "0.82rem",
+                color: "#FBBF24",
+                backgroundColor: "rgba(245, 158, 11, 0.15)",
+                border: "1px solid rgba(245, 158, 11, 0.35)",
+                padding: "0.5rem 0.75rem",
+                borderRadius: "8px",
+                display: "flex",
+                alignItems: "center",
+                gap: "0.5rem",
+              }}
+            >
+              <span style={{ fontSize: "1.1rem" }}>👉</span>
+              <span>
+                <strong>Look at your Chrome toolbar:</strong> Click the BridgeKey icon with the blue <strong>[1]</strong> badge and click <strong>"Confirm"</strong> to submit!
+              </span>
+            </div>
+          )}
         </div>
       )}
     </div>

@@ -1,0 +1,55 @@
+{
+  "network": "mstTestnet",
+  "chainId": "91562037",
+  "timestamp": "2026-10-29T13:24:31.745Z",
+  "deployer": "0x06e08cf0aed1663834E267E90333164a0276bbbD",
+  "contracts": {
+    "VaultFactory": {
+      "address": "0xFf1A398eaEAd76dEEA1bF84BDF52e25848369308",
+      "txHash": "0xbcbce9ec5a34f21b094d8206e1bb236a936b0b64d167cfdd322035e54f6a81b6"
+    },
+    "GenesisClubVault": {
+      "address": "0xECAD385e56299b0aec5A51dB2DdCF0A4746E7c31",
+      "name": "Web3 Builders Club",
+      "members": [
+        "0x06e08cf0aed1663834E267E90333164a0276bbbD",
+        "0xF09192ed618C49e9f9A439D97d798F8c600A38a8"
+      ],
+      "requiredApprovals": 1,
+      "txHash": "0x2c9339df8148d78298ebd96d3ed80512aa809adb7139821f5f8c5c9e1116855b"
+    },
+    "VaultFactoryV2": {
+      "address": "0x68738EfB0e8B2Dad986a9FF3Db3eF39A0D4Fcfb0",
+      "txHash": "0xbd7b7d116edfac3d8810bd9cb636303c9e278983612497b06a0bc5d639e9ba0e"
+    },
+    "GenesisClubVaultV2": {
+      "address": "0x8442bF7dE2d0FF9aF4136a83Cf20BE559b6Fb5C9",
+      "name": "Web3 Builders Club V2",
+      "members": [
+        "0x06e08cf0aed1663834E267E90333164a0276bbbD",
+        "0xF09192ed618C49e9f9A439D97d798F8c600A38a8"
+      ],
+      "requiredApprovals": 1,
+      "txHash": "0xc1274dafc3ea717f814082782fe9c9196f38f5111d8ab82aba49cabf582666a6"
+    },
+    "TestRelayerVault2of2": {
+      "address": "0x90e309A5246B37bBC79224A1449D25CC29ef88bE",
+      "name": "MST Relayer Test Vault (2-of-2)",
+      "members": [
+        "0x06e08cf0aed1663834E267E90333164a0276bbbD",
+        "0xF09192ed618C49e9f9A439D97d798F8c600A38a8"
+      ],
+      "requiredApprovals": 2,
+      "txHash": "0x9f7909cf89581caacfe6eed92881c8616b5507f1fc7373e6cd71a57358403be7",
+      "blockNumber": 6683321
+    }
+  },
+  "explorerUrls": {
+    "factory": "https://testnet.mstscan.com/address/0xFf1A398eaEAd76dEEA1bF84BDF52e25848369308",
+    "genesisVault": "https://testnet.mstscan.com/address/0xECAD385e56299b0aec5A51dB2DdCF0A4746E7c31",
+    "factoryV2": "https://testnet.mstscan.com/address/0x68738EfB0e8B2Dad986a9FF3Db3eF39A0D4Fcfb0",
+    "genesisVaultV2": "https://testnet.mstscan.com/address/0x8442bF7dE2d0FF9aF4136a83Cf20BE559b6Fb5C9",
+    "testRelayerVault2of2": "https://testnet.mstscan.com/address/0x90e309A5246B37bBC79224A1449D25CC29ef88bE"
+  },
+  "lastUpdated": "2026-10-29T23:13:00.000Z"
+}

@@ -9,3 +9,6 @@ dist/
 build/
 frontend/dist/
 .DS_Store
+.vercel/
+.env*.local
+*.log

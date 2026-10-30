@@ -47,7 +47,14 @@ async function main() {
   console.log("\n[2/3] Instantiating Genesis ClubVault via Factory...");
   const clubName = "Web3 Builders Club";
   const clubDesc = "Decentralized treasury for hackathon expenses and grants";
-  const initialMembers = [deployerAddress];
+  // Include both deployer and user funded BridgeKey wallet as authorized initial members
+  const fundedBridgeKeyWallet = "0xF09192ed618C49e9f9A439D97d798F8c600A38a8";
+  const initialMembers = Array.from(
+    new Set([
+      ethers.getAddress(deployerAddress),
+      ethers.getAddress(fundedBridgeKeyWallet),
+    ])
+  );
   const requiredApprovals = 1;
 
   const createTx = await factory.createVault(

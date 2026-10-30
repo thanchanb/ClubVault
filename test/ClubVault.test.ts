@@ -250,6 +250,91 @@ describe("ClubVault Unit & Invariant Test Suite", function () {
         "InvalidProposalState"
       );
     });
+
+    it("should reject execution after executionDeadline and allow releasing reservedFunds via markProposalExpired", async function () {
+      // Create proposal with a 2-hour execution window
+      const twoHours = 2 * 3600;
+      await vault
+        .connect(member1)
+        .createProposal(0, recipient.address, proposalAmount, "Time-limited kit", twoHours, 0);
+
+      // Approve proposal
+      await vault.connect(member2).voteProposal(1, true); // APPROVED
+
+      expect(await vault.reservedFunds()).to.equal(proposalAmount);
+      expect(await vault.availableFunds()).to.equal(treasuryFund - proposalAmount);
+
+      // Cannot mark expired before deadline
+      await expect(vault.markProposalExpired(1)).to.be.revertedWithCustomError(
+        vault,
+        "ExecutionDeadlineNotExceeded"
+      );
+
+      // Fast forward past executionDeadline
+      await time.increase(twoHours + 10);
+
+      // Attempting to execute now should revert with ExecutionDeadlineExceeded
+      await expect(vault.executeProposal(1)).to.be.revertedWithCustomError(
+        vault,
+        "ExecutionDeadlineExceeded"
+      );
+
+      // Now anyone can call markProposalExpired to unlock the reserved funds
+      await expect(vault.markProposalExpired(1))
+        .to.emit(vault, "ProposalExpired")
+        .withArgs(1, proposalAmount)
+        .and.to.emit(vault, "ProposalStatusChanged")
+        .withArgs(1, 1, 2); // APPROVED (1) -> REJECTED (2)
+
+      // Verified: reserved funds released back to availableFunds!
+      expect(await vault.reservedFunds()).to.equal(0);
+      expect(await vault.availableFunds()).to.equal(treasuryFund);
+    });
+
+    it("should allow deferred pending proposal to be approved once funds are deposited via approvePendingProposal", async function () {
+      // Treasury has 10 ETH.
+      // Member 1 creates Proposal 1 for 7 ETH
+      await vault
+        .connect(member1)
+        .createProposal(0, recipient.address, ethers.parseEther("7.0"), "Project Alpha", 0, 0);
+      // Member 1 creates Proposal 2 for 5 ETH (7 + 5 = 12 ETH > 10 ETH)
+      await vault
+        .connect(member1)
+        .createProposal(0, recipient.address, ethers.parseEther("5.0"), "Project Beta", 0, 0);
+
+      // Approve Proposal 1 -> Locks 7 ETH (available = 3 ETH)
+      await vault.connect(member2).voteProposal(1, true);
+      expect(await vault.reservedFunds()).to.equal(ethers.parseEther("7.0"));
+      expect(await vault.availableFunds()).to.equal(ethers.parseEther("3.0"));
+
+      // Member 2 votes on Proposal 2 -> approvalsCount reaches 2, but available funds (3 ETH) < 5 ETH
+      // So Proposal 2 remains PENDING to preserve solvency!
+      await vault.connect(member2).voteProposal(2, true);
+      const prop2 = await vault.getProposal(2);
+      expect(prop2.status).to.equal(0); // PENDING
+      expect(prop2.approvalsCount).to.equal(2);
+      expect(await vault.reservedFunds()).to.equal(ethers.parseEther("7.0")); // still 7 ETH
+
+      // Attempting to approve while still underfunded fails
+      await expect(vault.approvePendingProposal(2)).to.be.revertedWithCustomError(
+        vault,
+        "InsufficientAvailableFunds"
+      );
+
+      // Now new deposit arrives (5 ETH)
+      await vault.connect(owner).deposit({ value: ethers.parseEther("5.0") });
+      expect(await vault.availableFunds()).to.equal(ethers.parseEther("8.0"));
+
+      // Now approvePendingProposal succeeds!
+      await expect(vault.approvePendingProposal(2))
+        .to.emit(vault, "ProposalStatusChanged")
+        .withArgs(2, 0, 1); // PENDING -> APPROVED
+
+      const prop2Approved = await vault.getProposal(2);
+      expect(prop2Approved.status).to.equal(1); // APPROVED
+      expect(await vault.reservedFunds()).to.equal(ethers.parseEther("12.0"));
+      expect(await vault.availableFunds()).to.equal(ethers.parseEther("3.0"));
+    });
   });
 
   describe("4. Advance-Payment & Receipt-Confirmation Subsystem", function () {
@@ -329,6 +414,35 @@ describe("ClubVault Unit & Invariant Test Suite", function () {
       const prop = await vault.getProposal(1);
       expect(prop.status).to.equal(5);
       expect(prop.receiptHash).to.equal(receiptCID);
+    });
+
+    it("should reject empty receipt hash", async function () {
+      await vault
+        .connect(member1)
+        .createProposal(1, recipient.address, advanceAmount, "Drone Parts", 0, GRACE_PERIOD);
+      await vault.connect(member2).voteProposal(1, true);
+      await vault.executeProposal(1);
+
+      await expect(
+        vault.connect(recipient).submitReceipt(1, "", "Missing receipt document")
+      ).to.be.revertedWithCustomError(vault, "InvalidReceiptHash");
+    });
+
+    it("should reject double voting on receipts", async function () {
+      await vault
+        .connect(member1)
+        .createProposal(1, recipient.address, advanceAmount, "Drone Parts", 0, GRACE_PERIOD);
+      await vault.connect(member2).voteProposal(1, true);
+      await vault.executeProposal(1);
+
+      await vault
+        .connect(recipient)
+        .submitReceipt(1, "ipfs://receipt123", "Valid store invoice");
+
+      await vault.connect(member1).voteOnReceipt(1, true, "Verified");
+      await expect(
+        vault.connect(member1).voteOnReceipt(1, true, "Voting again")
+      ).to.be.revertedWithCustomError(vault, "AlreadyVoted");
     });
 
     it("should settle advance when members confirm receipt by quorum", async function () {

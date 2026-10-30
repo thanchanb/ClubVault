@@ -113,6 +113,7 @@ contract ClubVault is ReentrancyGuard {
     );
     event ProposalVoted(uint256 indexed proposalId, address indexed voter, bool approve, uint256 approvals, uint256 rejections);
     event ProposalStatusChanged(uint256 indexed proposalId, ProposalStatus indexed oldStatus, ProposalStatus indexed newStatus);
+    event ProposalExpired(uint256 indexed proposalId, uint256 amount);
     event FundsDisbursed(uint256 indexed proposalId, address indexed recipient, uint256 amount, ProposalType proposalType);
     event ReceiptSubmitted(uint256 indexed proposalId, address indexed submitter, string receiptHash, string receiptDescription, uint256 receiptDeadline);
     event ReceiptVoted(uint256 indexed proposalId, address indexed voter, bool approve, uint256 approvals, uint256 rejections);
@@ -135,6 +136,7 @@ contract ClubVault is ReentrancyGuard {
     error InvalidProposalState(ProposalStatus current, ProposalStatus expected);
     error AlreadyVoted(uint256 proposalId, address voter);
     error ExecutionDeadlineExceeded(uint256 deadline, uint256 currentTimestamp);
+    error ExecutionDeadlineNotExceeded(uint256 deadline, uint256 currentTimestamp);
     error ReceiptDeadlineExceeded(uint256 deadline, uint256 currentTimestamp);
     error ReceiptDeadlineNotExceeded(uint256 deadline, uint256 currentTimestamp);
     error InvalidReceiptHash();
@@ -335,6 +337,7 @@ contract ClubVault is ReentrancyGuard {
             }
 
             p.status = ProposalStatus.APPROVED;
+            p.executionDeadline = block.timestamp + (p.executionDeadline > p.createdAt ? p.executionDeadline - p.createdAt : 7 days);
             reservedFunds += p.amount; // Reserve funds immediately to prevent double spending
             emit ProposalStatusChanged(_proposalId, ProposalStatus.PENDING, ProposalStatus.APPROVED);
         }
@@ -343,6 +346,31 @@ contract ClubVault is ReentrancyGuard {
             p.status = ProposalStatus.REJECTED;
             emit ProposalStatusChanged(_proposalId, ProposalStatus.PENDING, ProposalStatus.REJECTED);
         }
+    }
+
+    /**
+     * @notice Finalize approval of a pending proposal that already achieved member quorum but was deferred due to insufficient available funds at voting time.
+     * @param _proposalId Proposal identifier.
+     */
+    function approvePendingProposal(uint256 _proposalId) external {
+        if (_proposalId == 0 || _proposalId > proposalCount) revert ProposalNotFound(_proposalId);
+        Proposal storage p = _proposals[_proposalId];
+
+        if (p.status != ProposalStatus.PENDING) {
+            revert InvalidProposalState(p.status, ProposalStatus.PENDING);
+        }
+        if (p.approvalsCount < requiredApprovals) {
+            revert InvalidQuorum(p.approvalsCount, requiredApprovals);
+        }
+        if (p.amount > availableFunds()) {
+            revert InsufficientAvailableFunds(p.amount, availableFunds());
+        }
+
+        p.status = ProposalStatus.APPROVED;
+        p.executionDeadline = block.timestamp + (p.executionDeadline > p.createdAt ? p.executionDeadline - p.createdAt : 7 days);
+        reservedFunds += p.amount;
+
+        emit ProposalStatusChanged(_proposalId, ProposalStatus.PENDING, ProposalStatus.APPROVED);
     }
 
     // --- Execution & Disbursement ---
@@ -359,10 +387,6 @@ contract ClubVault is ReentrancyGuard {
             revert InvalidProposalState(p.status, ProposalStatus.APPROVED);
         }
         if (block.timestamp > p.executionDeadline) {
-            // Execution window expired, release reserved funds back to treasury
-            reservedFunds -= p.amount;
-            p.status = ProposalStatus.REJECTED;
-            emit ProposalStatusChanged(_proposalId, ProposalStatus.APPROVED, ProposalStatus.REJECTED);
             revert ExecutionDeadlineExceeded(p.executionDeadline, block.timestamp);
         }
 
@@ -388,6 +412,29 @@ contract ClubVault is ReentrancyGuard {
         if (!success) {
             revert TransferFailed(p.recipient, p.amount);
         }
+    }
+
+    /**
+     * @notice Mark an approved proposal as expired if the execution deadline passed without disbursement.
+     * @dev Releases locked reservedFunds back to available treasury funds. Callable by anyone after the deadline.
+     * @param _proposalId Proposal identifier.
+     */
+    function markProposalExpired(uint256 _proposalId) external {
+        if (_proposalId == 0 || _proposalId > proposalCount) revert ProposalNotFound(_proposalId);
+        Proposal storage p = _proposals[_proposalId];
+
+        if (p.status != ProposalStatus.APPROVED) {
+            revert InvalidProposalState(p.status, ProposalStatus.APPROVED);
+        }
+        if (block.timestamp <= p.executionDeadline) {
+            revert ExecutionDeadlineNotExceeded(p.executionDeadline, block.timestamp);
+        }
+
+        reservedFunds -= p.amount;
+        p.status = ProposalStatus.REJECTED;
+
+        emit ProposalExpired(_proposalId, p.amount);
+        emit ProposalStatusChanged(_proposalId, ProposalStatus.APPROVED, ProposalStatus.REJECTED);
     }
 
     // --- Advance Payment & Receipt Confirmation Subsystem ---

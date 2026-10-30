@@ -11,6 +11,7 @@ import {
   Zap,
   Vote,
   AlertTriangle,
+  Fuel,
 } from "lucide-react";
 
 interface ProposalDetailModalProps {
@@ -22,6 +23,7 @@ interface ProposalDetailModalProps {
   requiredApprovals: number;
   totalMembers: number;
   account: string | null;
+  onGaslessVote?: (proposal: ProposalData) => void;
 }
 
 export const ProposalDetailModal: React.FC<ProposalDetailModalProps> = ({
@@ -33,6 +35,7 @@ export const ProposalDetailModal: React.FC<ProposalDetailModalProps> = ({
   requiredApprovals,
   totalMembers,
   account,
+  onGaslessVote,
 }) => {
   if (!proposal) return null;
 
@@ -227,10 +230,35 @@ export const ProposalDetailModal: React.FC<ProposalDetailModalProps> = ({
             )}
           </div>
 
-          <div style={{ display: "flex", gap: "0.6rem" }}>
+          <div style={{ display: "flex", gap: "0.6rem", flexWrap: "wrap", alignItems: "center" }}>
             {isPending && (
               <>
+                {onGaslessVote && (
+                  <button
+                    id="detail-modal-gasless-vote-btn"
+                    className="btn btn-secondary"
+                    style={{
+                      border: "1px solid var(--accent-emerald)",
+                      color: "var(--accent-emerald)",
+                      background: "rgba(16, 185, 129, 0.12)",
+                      display: "inline-flex",
+                      alignItems: "center",
+                      gap: "0.4rem",
+                      padding: "0.5rem 0.9rem",
+                      fontWeight: 700,
+                    }}
+                    onClick={() => {
+                      onClose();
+                      onGaslessVote(proposal);
+                    }}
+                    title="Cast Gas-Sponsored Vote via EIP-712 Relayer (0 Gas Paid by Voter)"
+                  >
+                    <Fuel style={{ width: "16px", height: "16px" }} />
+                    <span>Gasless Vote (0 Gas)</span>
+                  </button>
+                )}
                 <button
+                  id="detail-modal-direct-vote-btn"
                   className="btn btn-success"
                   onClick={() => {
                     onVote(proposal.id, true);
@@ -238,9 +266,10 @@ export const ProposalDetailModal: React.FC<ProposalDetailModalProps> = ({
                   }}
                 >
                   <CheckCircle2 style={{ width: "16px", height: "16px" }} />
-                  <span>Cast Affirmative Vote</span>
+                  <span>Direct Vote</span>
                 </button>
                 <button
+                  id="detail-modal-reject-vote-btn"
                   className="btn btn-danger"
                   onClick={() => {
                     onVote(proposal.id, false);

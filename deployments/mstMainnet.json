@@ -1,0 +1,43 @@
+{
+  "network": "mstMainnet",
+  "chainId": "4646",
+  "timestamp": "2026-10-30T15:43:43.936Z",
+  "deployer": "0xF09192ed618C49e9f9A439D97d798F8c600A38a8",
+  "financialAudit": {
+    "initialBalance": "5.0 MSTC",
+    "totalSpent": "0.006574079 MSTC",
+    "remainingBalance": "4.993425921 MSTC",
+    "gasPrice": "1.0 Gwei",
+    "totalGasUnits": "6574079",
+    "budgetLimitCheck": "PASSED (Well below 4.0 MSTC limit)",
+    "reserveCheck": "PASSED (Well above 1.0 MSTC reserve)"
+  },
+  "contracts": {
+    "VaultFactoryV2": {
+      "address": "0x57B3f9C17ADfAa10d2Bbc9E2955be41ed2528b58",
+      "txHash": "0x32db13ff475f73fe9268b04739765c8cc7e0cd33f94c4c448bc89df19cb5247d",
+      "blockNumber": 21785565,
+      "gasUsed": "3533641",
+      "explorerUrl": "https://mstscan.com/address/0x57B3f9C17ADfAa10d2Bbc9E2955be41ed2528b58"
+    },
+    "GenesisClubVaultV2": {
+      "address": "0x9a81aED1b3D2d4c85A0ea8FC6129D17b2fFed339",
+      "name": "Web3 Builders Club",
+      "description": "MST Mainnet Production Treasury Vault (2-of-2 Multisig)",
+      "members": [
+        "0x06e08cf0aed1663834E267E90333164a0276bbbD",
+        "0xF09192ed618C49e9f9A439D97d798F8c600A38a8"
+      ],
+      "requiredApprovals": 2,
+      "txHash": "0x1ffb4a74c043e5ed3fa37ccd685ca1d5fdd93b02adb8c2996c4d5fbe0e6385d7",
+      "blockNumber": 21785567,
+      "gasUsed": "3040438",
+      "explorerUrl": "https://mstscan.com/address/0x9a81aED1b3D2d4c85A0ea8FC6129D17b2fFed339"
+    }
+  },
+  "explorerUrls": {
+    "factoryV2": "https://mstscan.com/address/0x57B3f9C17ADfAa10d2Bbc9E2955be41ed2528b58",
+    "genesisVaultV2": "https://mstscan.com/address/0x9a81aED1b3D2d4c85A0ea8FC6129D17b2fFed339"
+  },
+  "lastUpdated": "2026-10-30T15:43:43.936Z"
+}
