@@ -421,6 +421,10 @@ h1, h2, h3, h4, h5, h6 {
   flex-shrink: 0;
 }
 
+.cv-mobile-menu-btn {
+  display: none;
+}
+
 /* Network pill */
 .network-badge {
   display: inline-flex;
@@ -1375,15 +1379,16 @@ textarea.form-control {
 }
 
 /* Responsive adjustments */
-@media (max-width: 1440px) {
+@media (max-width: 1920px) {
   .cv-navbar {
     padding: 0.75rem 1.25rem;
   }
   .cv-nav-inner {
+    max-width: 100%;
     gap: 0.5rem;
   }
   .cv-nav-links {
-    display: none;
+    display: none !important;
   }
   .cv-mobile-menu-btn {
     display: flex !important;
@@ -1393,10 +1398,12 @@ textarea.form-control {
   }
   .cv-nav-actions {
     gap: 0.45rem;
+    margin-left: auto;
   }
   .cv-wallet-badge {
     padding: 0.45rem 0.85rem;
     font-size: 0.78rem;
+    flex-shrink: 0;
   }
 }
 

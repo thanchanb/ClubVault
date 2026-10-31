@@ -322,7 +322,6 @@ export const Navbar: React.FC<NavbarProps> = ({
             style={{
               padding: "0.5rem",
               borderRadius: "var(--radius-pill)",
-              display: "none",
               alignItems: "center",
               justifyContent: "center",
               width: "36px",
