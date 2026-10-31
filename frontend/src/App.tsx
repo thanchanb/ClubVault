@@ -390,7 +390,7 @@ export const App: React.FC = () => {
 
   // Synchronize hash, active section scrolling, and tabs on hashchange / reload
   useEffect(() => {
-    const syncRouteAndScroll = () => {
+    const syncRouteAndScroll = (isHashChange = false) => {
       const hash = window.location.hash.toLowerCase();
       if (hash.startsWith("#pricing")) {
         setCurrentRoute("pricing");
@@ -409,6 +409,25 @@ export const App: React.FC = () => {
         window.scrollTo({ top: 0 });
       } else {
         setCurrentRoute("home");
+
+        // On initial page load or browser reload: always start at the Hero Overview page at the top (Photo 2)
+        if (!isHashChange) {
+          setActiveNavSection("overview");
+          setActiveTab("proposals");
+          if (hash.includes("treasury") || hash.includes("app") || hash.includes("home") || hash.includes("overview") || hash === "") {
+            try {
+              window.history.replaceState(null, "", window.location.pathname + window.location.search);
+            } catch {}
+          }
+          window.scrollTo(0, 0);
+          requestAnimationFrame(() => window.scrollTo(0, 0));
+          setTimeout(() => window.scrollTo(0, 0), 60);
+          setTimeout(() => window.scrollTo(0, 0), 160);
+          setTimeout(() => window.scrollTo(0, 0), 320);
+          setTimeout(() => window.scrollTo(0, 0), 500);
+          return;
+        }
+
         if (hash.includes("proposals")) {
           setActiveTab("proposals");
           setTimeout(() => {
@@ -423,7 +442,7 @@ export const App: React.FC = () => {
           }, 150);
         } else if (hash.includes("app") || hash.includes("treasury")) {
           setTimeout(() => {
-            const el = document.getElementById("treasury");
+            const el = document.getElementById("treasury-dashboard") || document.getElementById("treasury");
             if (el) el.scrollIntoView({ behavior: "smooth" });
           }, 150);
         } else if (hash === "" || hash.includes("home") || hash.includes("overview")) {
@@ -432,9 +451,10 @@ export const App: React.FC = () => {
       }
     };
 
-    syncRouteAndScroll();
-    window.addEventListener("hashchange", syncRouteAndScroll);
-    return () => window.removeEventListener("hashchange", syncRouteAndScroll);
+    syncRouteAndScroll(false);
+    const handleHashChange = () => syncRouteAndScroll(true);
+    window.addEventListener("hashchange", handleHashChange);
+    return () => window.removeEventListener("hashchange", handleHashChange);
   }, []);
 
   const navigateToRoute = (route: string) => {
@@ -444,9 +464,8 @@ export const App: React.FC = () => {
       window.scrollTo({ top: 0, behavior: "smooth" });
     } else if (route === "app" || route === "treasury") {
       setCurrentRoute("home");
-      window.location.hash = "#treasury";
       setTimeout(() => {
-        const el = document.getElementById("treasury");
+        const el = document.getElementById("treasury-dashboard") || document.getElementById("treasury");
         if (el) el.scrollIntoView({ behavior: "smooth" });
       }, 50);
     } else {
@@ -482,8 +501,8 @@ export const App: React.FC = () => {
     }
 
     setTimeout(() => {
-      const targetId = sectionId === "overview" ? "home" : sectionId;
-      const el = document.getElementById(targetId);
+      const targetId = sectionId === "overview" ? "home" : (sectionId === "treasury" ? "treasury-dashboard" : sectionId);
+      const el = document.getElementById(targetId) || document.getElementById(sectionId);
       if (el) {
         el.scrollIntoView({ behavior: "smooth" });
       } else if (sectionId === "overview") {
@@ -1061,12 +1080,15 @@ export const App: React.FC = () => {
       setIsRefreshingData(false);
     }
 
-    // Automatically return user to main Overview/Dashboard page and scroll to top
+    // Automatically return user to main Overview/Dashboard page and scroll to top (Photo 2)
     setCurrentRoute("home");
     setActiveNavSection("overview");
     setActiveTab("proposals");
     if (typeof window !== "undefined") {
-      window.location.hash = "#home";
+      try {
+        window.history.replaceState(null, "", window.location.pathname + window.location.search);
+      } catch {}
+      window.location.hash = "";
       window.scrollTo({ top: 0, behavior: "smooth" });
     }
   };
@@ -2315,7 +2337,7 @@ export const App: React.FC = () => {
           </section>
 
           {/* 4. Live Treasury Workspace */}
-          <main id="treasury" className="container" style={{ paddingTop: "3rem" }}>
+          <main id="treasury-dashboard" className="container" style={{ paddingTop: "3rem" }}>
         {/* Network & Contract Deployment Status Banner */}
         <div
           style={{

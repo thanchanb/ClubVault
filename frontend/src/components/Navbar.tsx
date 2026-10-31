@@ -83,7 +83,8 @@ export const Navbar: React.FC<NavbarProps> = ({
     if (onNavigateSection) {
       onNavigateSection(id);
     } else {
-      const el = document.getElementById(id);
+      const targetId = id === "overview" ? "home" : (id === "treasury" ? "treasury-dashboard" : id);
+      const el = document.getElementById(targetId) || document.getElementById(id);
       if (el) {
         el.scrollIntoView({ behavior: "smooth" });
       }

@@ -18,6 +18,30 @@
       href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=Outfit:wght@500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap"
       rel="stylesheet"
     />
+    <script>
+      try {
+        if ('scrollRestoration' in history) {
+          history.scrollRestoration = 'manual';
+        }
+        var h = window.location.hash.toLowerCase();
+        if (h.indexOf('treasury') !== -1 || h.indexOf('app') !== -1 || h.indexOf('home') !== -1 || h.indexOf('overview') !== -1) {
+          history.replaceState(null, '', window.location.pathname + window.location.search);
+        }
+        window.scrollTo(0, 0);
+        window.addEventListener('beforeunload', function() {
+          try {
+            if ('scrollRestoration' in history) {
+              history.scrollRestoration = 'manual';
+            }
+            var curHash = window.location.hash.toLowerCase();
+            if (curHash.indexOf('treasury') !== -1 || curHash.indexOf('app') !== -1 || curHash.indexOf('home') !== -1 || curHash.indexOf('overview') !== -1) {
+              history.replaceState(null, '', window.location.pathname + window.location.search);
+            }
+          } catch(e) {}
+          window.scrollTo(0, 0);
+        });
+      } catch (e) {}
+    </script>
   </head>
   <body class="bg-[#050505] text-[#A1A1AA] antialiased selection:bg-[#FF303B]/30 selection:text-[#F5F5F7]">
     <div id="root"></div>
