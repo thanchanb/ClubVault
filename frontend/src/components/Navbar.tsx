@@ -18,6 +18,8 @@ interface NavbarProps {
   currencySymbol?: string;
   theme?: "light" | "dark";
   onToggleTheme?: () => void;
+  onRefresh?: () => void | Promise<void>;
+  isRefreshing?: boolean;
 }
 
 export const Navbar: React.FC<NavbarProps> = ({
@@ -37,6 +39,8 @@ export const Navbar: React.FC<NavbarProps> = ({
   onNavigateRoute,
   theme = "dark",
   onToggleTheme,
+  onRefresh,
+  isRefreshing = false,
 }) => {
   const [scrolled, setScrolled] = useState(false);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
@@ -172,9 +176,9 @@ export const Navbar: React.FC<NavbarProps> = ({
             </button>
           )}
 
-          {/* Complete Reload Button (Fully resets app and reloads cleanly) */}
+          {/* Refresh Button */}
           <button
-            onClick={() => {
+            onClick={onRefresh ? onRefresh : () => {
               window.location.href = window.location.origin + window.location.pathname;
               window.location.reload();
             }}
@@ -187,11 +191,20 @@ export const Navbar: React.FC<NavbarProps> = ({
               justifyContent: "center",
               width: "36px",
               height: "36px",
+              cursor: isRefreshing ? "wait" : "pointer",
             }}
-            title="Complete Reload (Reset application to root)"
-            aria-label="Reload application"
+            title="Refresh on-chain data and return to Overview"
+            aria-label="Refresh data"
+            disabled={isRefreshing}
           >
-            <RotateCcw style={{ width: "15px", height: "15px", color: "var(--text-secondary)" }} />
+            <RotateCcw
+              style={{
+                width: "15px",
+                height: "15px",
+                color: "var(--text-secondary)",
+                animation: isRefreshing ? "spin 1s linear infinite" : undefined,
+              }}
+            />
           </button>
 
           {/* New Vault Button */}

@@ -436,7 +436,10 @@ export function parseWalletError(err: any): {
   const errString = typeof err === "string" ? err : JSON.stringify(err || {});
   const directMessage = err?.message || "";
   const nestedMessage = err?.error?.message || err?.info?.error?.message || "";
-  const combined = `${directMessage} ${nestedMessage} ${errString}`.toLowerCase();
+  const directData = typeof (err?.data || err?.error?.data || err?.info?.error?.data) === "string"
+    ? (err?.data || err?.error?.data || err?.info?.error?.data)
+    : "";
+  const combined = `${directMessage} ${nestedMessage} ${directData} ${errString}`.toLowerCase();
 
   const isExtensionReload =
     combined.includes("bridgekey was updated") ||
@@ -461,7 +464,15 @@ export function parseWalletError(err: any): {
     err?.code === "INSUFFICIENT_FUNDS";
 
   let message = "";
-  if (isExtensionReload) {
+  if (combined.includes("0xa3c3b15d") || combined.includes("a3c3b15d") || combined.includes("invalidproposalstate")) {
+    message = "This proposal is already approved or closed for voting.";
+  } else if (combined.includes("0x04f9da63") || combined.includes("04f9da63") || combined.includes("alreadyvoted")) {
+    message = "You have already voted on this proposal.";
+  } else if (combined.includes("0x16d6142c") || combined.includes("16d6142c") || combined.includes("notmember")) {
+    message = "Your wallet is not an authorised member of this vault.";
+  } else if (combined.includes("0x290a8bff") || combined.includes("290a8bff") || combined.includes("insufficientavailablefunds")) {
+    message = "The vault does not have enough available funds.";
+  } else if (isExtensionReload) {
     message = "BridgeKey extension was updated in the background. Please refresh this page to reconnect.";
   } else if (isUserReject) {
     message = "Transaction was cancelled in your wallet.";

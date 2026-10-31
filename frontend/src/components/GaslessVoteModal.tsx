@@ -24,6 +24,7 @@ export interface GaslessVoteModalProps {
     recipient: string;
     approvalsCount: number;
     rejectionsCount: number;
+    status?: number;
   } | null;
   vaultAddress: string;
   account: string;
@@ -53,12 +54,33 @@ export const GaslessVoteModal: React.FC<GaslessVoteModalProps> = ({
   const [isLoadingNonce, setIsLoadingNonce] = useState<boolean>(false);
   const [nonceError, setNonceError] = useState<string | null>(null);
 
+  const initialIsApproved = proposal?.status === 1;
+  const initialIsExecuted = proposal?.status === 3;
+  const initialIsClosed = proposal?.status !== undefined && proposal.status !== 0;
+
   const [step, setStep] = useState<
-    "ready" | "signing" | "relaying" | "confirmed" | "error"
-  >("ready");
-  const [statusMessage, setStatusMessage] = useState<string>("");
+    "ready" | "signing" | "relaying" | "confirmed" | "error" | "closed"
+  >(
+    initialIsApproved || initialIsExecuted || initialIsClosed
+      ? "closed"
+      : "ready"
+  );
+  const [statusMessage, setStatusMessage] = useState<string>(
+    initialIsApproved
+      ? "Quorum Reached — This proposal is approved and ready for execution."
+      : initialIsExecuted
+      ? "This proposal has already been executed."
+      : initialIsClosed
+      ? "Voting is closed for this proposal."
+      : ""
+  );
   const [txHash, setTxHash] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [isGaslessUnavailable, setIsGaslessUnavailable] = useState<boolean>(false);
+  const [verifiedOnChainStatus, setVerifiedOnChainStatus] = useState<number | null>(
+    proposal?.status !== undefined ? proposal.status : null
+  );
+  const [isStatusVerificationFailed, setIsStatusVerificationFailed] = useState<boolean>(false);
 
   // Active signer detection strictly from props account (no stale localStorage fallbacks)
   const effectiveAccount = React.useMemo(() => {
@@ -75,15 +97,30 @@ export const GaslessVoteModal: React.FC<GaslessVoteModalProps> = ({
     return isMember;
   }, [isMember, effectiveAccount]);
 
-  // Fetch live on-chain nonce directly from canonical MST Testnet RPC independently of wallet connection state
+  // Fetch live on-chain nonce and authoritative proposal status directly from canonical MST Testnet RPC
   useEffect(() => {
-    if (!isOpen || !vaultAddress) return;
+    if (!isOpen || !vaultAddress || !proposal) return;
 
     let isMounted = true;
-    const fetchNonce = async () => {
+    const fetchNonceAndStatus = async () => {
       setIsLoadingNonce(true);
       setNonceError(null);
       setNonce(null);
+      setIsGaslessUnavailable(false);
+      setIsStatusVerificationFailed(false);
+
+      // In-memory fast pre-check using existing proposal state
+      const initialStatus = proposal.status !== undefined ? Number(proposal.status) : null;
+      if (initialStatus === 1) {
+        setStep("closed");
+        setStatusMessage("Quorum Reached — This proposal is approved and ready for execution.");
+      } else if (initialStatus === 3) {
+        setStep("closed");
+        setStatusMessage("This proposal has already been executed.");
+      } else if (initialStatus !== null && initialStatus !== 0) {
+        setStep("closed");
+        setStatusMessage("Voting is closed for this proposal.");
+      }
 
       try {
         const normalizedVault = ethers.getAddress(vaultAddress);
@@ -100,39 +137,76 @@ export const GaslessVoteModal: React.FC<GaslessVoteModalProps> = ({
 
         const contract = new ethers.Contract(normalizedVault, ClubVaultV2ABI, rpcProvider);
 
-        // Fetch on-chain nonce for voter from contract mapping and verify EIP-712 DOMAIN_SEPARATOR
-        const [onChainNonce, domainSeparator] = await Promise.all([
-          contract.nonces(voterToQuery),
-          contract.DOMAIN_SEPARATOR().catch(() => null),
-        ]);
+        // Fetch on-chain nonce for voter, verify EIP-712 DOMAIN_SEPARATOR, and verify authoritative on-chain proposal state
+        let onChainNonce: any = null;
+        let domainSeparator: any = null;
+        let onChainProp: any = null;
+
+        try {
+          const results = await Promise.all([
+            contract.nonces(voterToQuery),
+            contract.DOMAIN_SEPARATOR().catch(() => null),
+            contract.getProposal(proposal.id),
+          ]);
+          onChainNonce = results[0];
+          domainSeparator = results[1];
+          onChainProp = results[2];
+        } catch (rpcErr: any) {
+          console.warn("Authoritative on-chain query error:", rpcErr);
+          if (isMounted) {
+            setIsStatusVerificationFailed(true);
+            setStep("closed");
+            setStatusMessage("Unable to verify proposal status. Please refresh and try again.");
+            setIsLoadingNonce(false);
+          }
+          return;
+        }
 
         if (domainSeparator === null) {
           throw new Error("Contract does not implement EIP-712 DOMAIN_SEPARATOR (V1 Genesis Contract)");
         }
 
+        const liveStatus = Number(onChainProp.status);
         if (isMounted) {
+          setVerifiedOnChainStatus(liveStatus);
           setNonce(Number(onChainNonce));
           setNonceError(null);
-          setStep("ready");
+
+          // Authoritative state evaluation
+          if (liveStatus === 1) { // APPROVED
+            setStep("closed");
+            setStatusMessage("Quorum Reached — This proposal is approved and ready for execution.");
+          } else if (liveStatus === 3) { // EXECUTED
+            setStep("closed");
+            setStatusMessage("This proposal has already been executed.");
+          } else if (liveStatus !== 0) { // Any other closed status
+            setStep("closed");
+            setStatusMessage("Voting is closed for this proposal.");
+          } else {
+            // PENDING: open for voting
+            setStep("ready");
+          }
         }
       } catch (err: any) {
-        console.warn("Could not query V2 nonce from MST Testnet RPC:", err.message || err);
+        console.warn("Could not query V2 nonce or proposal from MST Testnet RPC:", err.message || err);
         if (isMounted) {
           setNonce(null);
-          setNonceError(
-            `Could not query V2 nonce from this vault (${err.message || err}). If this is a V1 contract, EIP-712 voting is unsupported.`
-          );
+          if (!isStatusVerificationFailed) {
+            setNonceError(
+              `Could not query V2 nonce from this vault (${err.message || err}). If this is a V1 contract, EIP-712 voting is unsupported.`
+            );
+          }
         }
       } finally {
         if (isMounted) setIsLoadingNonce(false);
       }
     };
 
-    fetchNonce();
+    fetchNonceAndStatus();
     return () => {
       isMounted = false;
     };
-  }, [isOpen, effectiveAccount, vaultAddress]);
+  }, [isOpen, effectiveAccount, vaultAddress, proposal]);
 
   if (!isOpen || !proposal) return null;
 
@@ -151,18 +225,44 @@ export const GaslessVoteModal: React.FC<GaslessVoteModalProps> = ({
       return;
     }
 
+    // Authoritative pre-sign guard: prevent voting if not confirmed PENDING
+    if (isStatusVerificationFailed || verifiedOnChainStatus === null) {
+      setStep("closed");
+      setStatusMessage("Unable to verify proposal status. Please refresh and try again.");
+      return;
+    }
+
+    if (verifiedOnChainStatus === 1) {
+      setStep("closed");
+      setStatusMessage("Quorum Reached — This proposal is approved and ready for execution.");
+      return;
+    }
+
+    if (verifiedOnChainStatus === 3) {
+      setStep("closed");
+      setStatusMessage("This proposal has already been executed.");
+      return;
+    }
+
+    if (verifiedOnChainStatus !== 0) {
+      setStep("closed");
+      setStatusMessage("Voting is closed for this proposal.");
+      return;
+    }
+
     try {
       setStep("signing");
       setStatusMessage("1/3: Please sign the EIP-712 typed vote message in your wallet...");
       setErrorMessage(null);
+      setIsGaslessUnavailable(false);
 
       const rawProvider = getBridgeKeyProvider();
-      if (!rawProvider) {
+      const eipComp = getEIP712CompatibleProvider();
+      // BridgeKey is the primary official wallet for MST Blockchain hackathon; preserve MetaMask/Rabby compatibility path
+      const providerToUse = rawProvider || eipComp?.provider;
+      if (!providerToUse) {
         throw new Error("No Web3 wallet provider detected. Please unlock BridgeKey, MetaMask, or Rabby.");
       }
-
-      // BridgeKey is the primary official wallet for MST Blockchain hackathon
-      const providerToUse = rawProvider;
 
       const activeBrowserProvider = new ethers.BrowserProvider(providerToUse);
 
@@ -201,7 +301,6 @@ export const GaslessVoteModal: React.FC<GaslessVoteModalProps> = ({
       };
 
       // STRICT, PURE EIP-712 Typed Signing (eth_signTypedData_v4)
-      // Never use eth_sign or weaken signature verification
       let signature: string;
       try {
         signature = await signer.signTypedData(domain, EIP712_VOTE_TYPES, value);
@@ -209,14 +308,22 @@ export const GaslessVoteModal: React.FC<GaslessVoteModalProps> = ({
         if (signErr.code === 4001 || signErr.code === "ACTION_REJECTED" || signErr.message?.includes("reject")) {
           throw new Error("Signature was rejected by user in wallet. No gas was spent.");
         }
-        if (
+        const errStr = `${signErr?.message || ""} ${signErr?.code || ""} ${JSON.stringify(signErr || "")}`;
+        const isUnsupported =
           signErr.code === -32601 ||
-          signErr.message?.includes("Unsupported method: eth_signTypedData_v4") ||
-          signErr.message?.includes("could not coalesce error")
-        ) {
-          throw new Error(
-            "BridgeKey wallet extension does not support off-chain EIP-712 typed signing (eth_signTypedData_v4). Please connect MetaMask or Rabby with Member 2's account to sign this gasless vote, or use Direct On-Chain Vote (Requires Gas)."
+          errStr.includes("-32601") ||
+          errStr.includes("eth_signTypedData_v4") ||
+          errStr.includes("could not coalesce error") ||
+          errStr.includes("Unsupported method") ||
+          errStr.includes("Method not found") ||
+          errStr.toLowerCase().includes("does not support");
+
+        if (isUnsupported) {
+          const unsupportedError: any = new Error(
+            "Gasless signing is unavailable with this wallet. You can continue using a standard on-chain vote."
           );
+          unsupportedError.isGaslessUnavailable = true;
+          throw unsupportedError;
         }
         throw new Error(`Wallet signing failed: ${signErr.message || signErr}`);
       }
@@ -256,16 +363,24 @@ export const GaslessVoteModal: React.FC<GaslessVoteModalProps> = ({
     } catch (err: any) {
       console.error("Relayed vote error:", err);
       setStep("error");
-      let rawMsg = err.message || "An unexpected error occurred during relayed voting.";
-      if (
-        rawMsg.includes("-32601") ||
-        rawMsg.includes("Unsupported method: eth_signTypedData_v4") ||
-        rawMsg.includes("could not coalesce error")
-      ) {
-        rawMsg =
-          "BridgeKey wallet extension does not support off-chain EIP-712 typed signing (eth_signTypedData_v4). Please use 'Fallback: Cast Direct Vote (with Gas)' below to vote directly with your 49.00 tMSTC balance, or switch to an EIP-712 compatible wallet (MetaMask / Rabby).";
+      const errStr = `${err?.message || ""} ${err?.code || ""}`;
+      const isUnavailable =
+        err?.isGaslessUnavailable ||
+        err?.code === -32601 ||
+        errStr.includes("-32601") ||
+        errStr.includes("eth_signTypedData_v4") ||
+        errStr.includes("could not coalesce error") ||
+        errStr.includes("Gasless signing is unavailable");
+
+      if (isUnavailable) {
+        setIsGaslessUnavailable(true);
+        setErrorMessage(
+          "Gasless signing is unavailable with this wallet. You can continue using a standard on-chain vote."
+        );
+      } else {
+        setIsGaslessUnavailable(false);
+        setErrorMessage(err.message || "An unexpected error occurred during relayed voting.");
       }
-      setErrorMessage(rawMsg);
     }
   };
 
@@ -541,54 +656,136 @@ export const GaslessVoteModal: React.FC<GaslessVoteModalProps> = ({
           </div>
         )}
 
+        {step === "closed" && (
+          <div style={{ textAlign: "center", padding: "1.5rem 0" }}>
+            {verifiedOnChainStatus === 1 ? (
+              <CheckCircle
+                style={{
+                  width: "48px",
+                  height: "48px",
+                  color: "var(--accent-emerald)",
+                  margin: "0 auto 0.75rem",
+                }}
+              />
+            ) : isStatusVerificationFailed ? (
+              <AlertTriangle
+                style={{
+                  width: "48px",
+                  height: "48px",
+                  color: "var(--accent-amber)",
+                  margin: "0 auto 0.75rem",
+                }}
+              />
+            ) : (
+              <ShieldCheck
+                style={{
+                  width: "48px",
+                  height: "48px",
+                  color: "var(--text-muted)",
+                  margin: "0 auto 0.75rem",
+                }}
+              />
+            )}
+            <p
+              style={{
+                fontWeight: "bold",
+                fontSize: "1.05rem",
+                color:
+                  verifiedOnChainStatus === 1
+                    ? "var(--accent-emerald)"
+                    : isStatusVerificationFailed
+                    ? "var(--accent-amber)"
+                    : "var(--text-color)",
+                marginBottom: "0.5rem",
+              }}
+            >
+              {statusMessage}
+            </p>
+            <div style={{ marginTop: "1.5rem" }}>
+              <button
+                type="button"
+                className="btn btn-secondary"
+                onClick={onClose}
+                style={{ minWidth: "120px", padding: "0.6rem 1.5rem" }}
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        )}
+
         {step === "error" && (
           <div style={{ padding: "1rem 0" }}>
             <div
               style={{
-                background: "rgba(239, 68, 68, 0.1)",
-                border: "1px solid rgba(239, 68, 68, 0.3)",
+                background: isGaslessUnavailable
+                  ? "rgba(59, 130, 246, 0.1)"
+                  : "rgba(239, 68, 68, 0.1)",
+                border: isGaslessUnavailable
+                  ? "1px solid rgba(59, 130, 246, 0.3)"
+                  : "1px solid rgba(239, 68, 68, 0.3)",
                 borderRadius: "0.5rem",
-                padding: "0.75rem",
-                marginBottom: "1rem",
+                padding: "0.85rem",
+                marginBottom: "1.25rem",
                 fontSize: "0.85rem",
-                color: "var(--accent-crimson)",
+                color: isGaslessUnavailable ? "#93C5FD" : "var(--accent-crimson)",
+                display: "flex",
+                alignItems: "flex-start",
+                gap: "0.6rem",
               }}
             >
-              {errorMessage}
+              {isGaslessUnavailable ? (
+                <ShieldCheck style={{ width: "18px", height: "18px", flexShrink: 0, marginTop: "2px", color: "#60A5FA" }} />
+              ) : (
+                <AlertTriangle style={{ width: "18px", height: "18px", flexShrink: 0, marginTop: "2px", color: "var(--accent-crimson)" }} />
+              )}
+              <span>{errorMessage}</span>
             </div>
 
-            <div style={{ display: "flex", flexDirection: "column", gap: "0.5rem" }}>
-              <button
-                type="button"
-                className="btn btn-secondary"
-                onClick={() => setStep("ready")}
-                style={{ width: "100%" }}
-              >
-                Try Gasless Voting Again
-              </button>
-              <button
-                id="btn-fallback-direct-vote"
-                type="button"
-                className="btn btn-primary"
-                onClick={() => {
-                  onClose();
-                  onFallbackDirectVote(proposal.id, voteChoice);
-                }}
-                style={{
-                  width: "100%",
-                  background: "var(--accent-crimson)",
-                  borderColor: "var(--accent-crimson)",
-                  display: "flex",
-                  alignItems: "center",
-                  justifyContent: "center",
-                  gap: "0.5rem",
-                  padding: "0.75rem",
-                  fontWeight: 700,
-                }}
-              >
-                <span>Direct On-Chain Vote (Requires Gas — ~0.0001 tMSTC)</span>
-                <ArrowRight style={{ width: "16px", height: "16px" }} />
-              </button>
+            <div style={{ display: "flex", flexDirection: "column", gap: "0.6rem" }}>
+              {!isGaslessUnavailable && (
+                <button
+                  type="button"
+                  className="btn btn-secondary"
+                  onClick={() => setStep("ready")}
+                  style={{ width: "100%" }}
+                >
+                  Try Gasless Voting Again
+                </button>
+              )}
+
+              {verifiedOnChainStatus === 0 ? (
+                <button
+                  id="btn-fallback-direct-vote"
+                  type="button"
+                  className="btn btn-primary"
+                  onClick={() => {
+                    onClose();
+                    onFallbackDirectVote(proposal.id, voteChoice);
+                  }}
+                  style={{
+                    width: "100%",
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    gap: "0.5rem",
+                    padding: "0.75rem",
+                    fontWeight: 700,
+                  }}
+                >
+                  <span>Direct On-Chain Vote (Requires Gas — ~0.0001 tMSTC)</span>
+                  <ArrowRight style={{ width: "16px", height: "16px" }} />
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  className="btn btn-secondary"
+                  onClick={onClose}
+                  style={{ width: "100%" }}
+                >
+                  Close
+                </button>
+              )}
             </div>
           </div>
         )}

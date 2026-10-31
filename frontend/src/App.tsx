@@ -302,6 +302,7 @@ export const App: React.FC = () => {
   const [showMainnetModal, setShowMainnetModal] = useState<boolean>(false);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const [activeNavSection, setActiveNavSection] = useState<string>("overview");
+  const [isRefreshingData, setIsRefreshingData] = useState<boolean>(false);
 
   // Live Invariant State
   type InvariantStatus = "CHECKING" | "VERIFIED" | "MISMATCH" | "UNAVAILABLE";
@@ -1037,6 +1038,39 @@ export const App: React.FC = () => {
     return () => clearInterval(interval);
   }, [vaultAddress]);
 
+  // Refresh on-chain data, reload vault state, proposals, balances, transactions, and return to Overview
+  const handleRefreshAll = async () => {
+    setIsRefreshingData(true);
+    setStatusMessage("Refreshing on-chain vault data from MST Blockchain...");
+    try {
+      isSyncingVaultRef.current = false;
+      if (account) {
+        const activeProvider = getBridgeKeyProvider() || (window as any).ethereum;
+        if (activeProvider) {
+          fetchWalletBalance(activeProvider, account, currentChainId)
+            .then((b) => setAccountBalance(b))
+            .catch(() => {});
+        }
+      }
+      await syncOnChainVault();
+      setStatusMessage("✔ Vault data refreshed successfully from MST Blockchain!");
+    } catch (err: any) {
+      console.warn("Refresh error:", err);
+      setStatusMessage("Vault data refreshed.");
+    } finally {
+      setIsRefreshingData(false);
+    }
+
+    // Automatically return user to main Overview/Dashboard page and scroll to top
+    setCurrentRoute("home");
+    setActiveNavSection("overview");
+    setActiveTab("proposals");
+    if (typeof window !== "undefined") {
+      window.location.hash = "#home";
+      window.scrollTo({ top: 0, behavior: "smooth" });
+    }
+  };
+
   // Create Proposal Action
   const handleCreateProposal = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -1140,6 +1174,26 @@ export const App: React.FC = () => {
 
   // Vote on Proposal
   const handleVoteProposal = async (id: number, approve: boolean) => {
+    // 1. In-memory pre-vote guard using existing proposal state
+    const existingProp = proposals.find((p) => p.id === id);
+    if (existingProp) {
+      if (existingProp.status === ProposalStatus.APPROVED) {
+        setTxStage("error");
+        setTxStageMessage("Quorum Reached — This proposal is approved and ready for execution.");
+        return;
+      }
+      if (existingProp.status === ProposalStatus.EXECUTED) {
+        setTxStage("error");
+        setTxStageMessage("This proposal has already been executed.");
+        return;
+      }
+      if (existingProp.status !== ProposalStatus.PENDING) {
+        setTxStage("error");
+        setTxStageMessage("Voting is closed for this proposal.");
+        return;
+      }
+    }
+
     const hasOnChainAddress = ethers.isAddress(vaultAddress);
     if (isContractDeployedOnChain || hasOnChainAddress) {
       if (!verifyTxPreflight(vaultAddress, "submit vote")) {
@@ -1151,6 +1205,31 @@ export const App: React.FC = () => {
         setTxStageMessage(`1/5: Requesting vote (${approve ? "Approve" : "Reject"}) in BridgeKey wallet...`);
         const vault = await getActiveContract(vaultAddress, ClubVaultABI);
         if (!vault) throw new Error("BridgeKey wallet provider not available. Please ensure BridgeKey is unlocked.");
+
+        // 2. Authoritative live on-chain status verification before requesting wallet signature
+        try {
+          const onChainProp = await vault.getProposal(id);
+          const onChainStatus = Number(onChainProp.status);
+          if (onChainStatus === ProposalStatus.APPROVED) {
+            setTxStage("error");
+            setTxStageMessage("Quorum Reached — This proposal is approved and ready for execution.");
+            return;
+          }
+          if (onChainStatus === ProposalStatus.EXECUTED) {
+            setTxStage("error");
+            setTxStageMessage("This proposal has already been executed.");
+            return;
+          }
+          if (onChainStatus !== ProposalStatus.PENDING) {
+            setTxStage("error");
+            setTxStageMessage("Voting is closed for this proposal.");
+            return;
+          }
+        } catch {
+          setTxStage("error");
+          setTxStageMessage("Unable to verify proposal status. Please refresh and try again.");
+          return;
+        }
 
         setTxStage("signing");
         setTxStageMessage(`2/5: Awaiting wallet confirmation in BridgeKey to vote on Proposal #${id}... (Click BridgeKey icon in toolbar)`);
@@ -1178,7 +1257,7 @@ export const App: React.FC = () => {
         } else if (parsed.isUserReject) {
           setTxStageMessage("Vote rejected in BridgeKey wallet.");
         } else {
-          setTxStageMessage(`Vote failed: ${parsed.message}`);
+          setTxStageMessage(parsed.message);
         }
       } finally {
         setVotingProposalId(null);
@@ -1948,6 +2027,8 @@ export const App: React.FC = () => {
         onNavigateRoute={navigateToRoute}
         theme={theme}
         onToggleTheme={toggleTheme}
+        onRefresh={handleRefreshAll}
+        isRefreshing={isRefreshingData}
       />
 
       {/* Global Toast Notification for Instant Feedback */}
@@ -2980,6 +3061,16 @@ export const App: React.FC = () => {
                       {p.status === ProposalStatus.APPROVED && p.proposalType === ProposalType.ADVANCE_PAYMENT && (
                         <div style={{ margin: "0.75rem 0", padding: "0.6rem 0.85rem", background: "rgba(255, 48, 59, 0.08)", border: "1px solid rgba(255, 48, 59, 0.25)", borderRadius: "var(--radius-sm)", fontSize: "0.78rem", fontFamily: "var(--font-mono)", color: "#FF8088" }}>
                           Stage 1 of 2: Quorum approved ({p.approvalsCount}/{requiredApprovals}). Releasing advance will disburse {p.amount} tMSTC to recipient. Receipt confirmation window begins upon release.
+                        </div>
+                      )}
+                      {p.status === ProposalStatus.APPROVED && p.proposalType !== ProposalType.ADVANCE_PAYMENT && (
+                        <div style={{ margin: "0.75rem 0", padding: "0.6rem 0.85rem", background: "rgba(16, 185, 129, 0.08)", border: "1px solid rgba(16, 185, 129, 0.25)", borderRadius: "var(--radius-sm)", fontSize: "0.78rem", fontFamily: "var(--font-mono)", color: "var(--accent-emerald)" }}>
+                          Quorum Reached — This proposal is approved and ready for execution.
+                        </div>
+                      )}
+                      {p.status === ProposalStatus.EXECUTED && (
+                        <div style={{ margin: "0.75rem 0", padding: "0.6rem 0.85rem", background: "rgba(255, 255, 255, 0.04)", border: "1px solid var(--border-subtle)", borderRadius: "var(--radius-sm)", fontSize: "0.78rem", fontFamily: "var(--font-mono)", color: "var(--text-muted)" }}>
+                          This proposal has already been executed.
                         </div>
                       )}
 
