@@ -90,7 +90,7 @@ export const GaslessVoteModal: React.FC<GaslessVoteModalProps> = ({
         const voterToQuery = effectiveAccount || CANONICAL_MEMBER_2;
 
         // ALWAYS query authoritative MST Testnet JSON-RPC directly via singleton
-        const rpcProvider = getMstRpcProvider();
+        const rpcProvider = getMstRpcProvider(MST_TESTNET_CONFIG.chainId);
 
         // Verify contract code exists on MST Testnet
         const code = await rpcProvider.getCode(normalizedVault);
