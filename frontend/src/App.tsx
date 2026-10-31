@@ -607,6 +607,12 @@ export const App: React.FC = () => {
         setCurrentChainId(chainId);
         setNetworkName(chainId === MST_MAINNET_CONFIG.chainId ? "MST Mainnet (4646)" : "MST Testnet (91562037)");
         setStatusMessage("Wallet Connected Successfully!");
+
+        const targetVault = chainId === MST_MAINNET_CONFIG.chainId
+          ? "0x9a81aED1b3D2d4c85A0ea8FC6129D17b2fFed339"
+          : "0x8442bF7dE2d0FF9aF4136a83Cf20BE559b6Fb5C9";
+        setVaultAddress(targetVault);
+        syncOnChainVault(targetVault);
       } else {
         setStatusMessage("Notice: Connected wallet is not on MST Network (Testnet 91562037 or Mainnet 4646).");
       }
@@ -781,7 +787,7 @@ export const App: React.FC = () => {
       return false;
     }
     if (!isCorrectNetwork) {
-      setStatusMessage(`Cannot ${actionName}: Wallet is not connected to MST Testnet (Chain ID 91562037).`);
+      setStatusMessage(`Cannot ${actionName}: Wallet is not connected to ${currentChainId === 4646 ? "MST Mainnet (Chain ID 4646)" : "MST Testnet (Chain ID 91562037)"}.`);
       return false;
     }
     if (!targetVault || !ethers.isAddress(targetVault)) {
@@ -797,6 +803,11 @@ export const App: React.FC = () => {
     if (success) {
       setIsCorrectNetwork(true);
       setIsLiveConnected(true);
+      setCurrentChainId(MST_TESTNET_CONFIG.chainId);
+      setNetworkName("MST Testnet (91562037)");
+      const testnetVault = "0x8442bF7dE2d0FF9aF4136a83Cf20BE559b6Fb5C9";
+      setVaultAddress(testnetVault);
+      syncOnChainVault(testnetVault);
       setStatusMessage("✔ Switched network to MST Testnet.");
     } else {
       setStatusMessage("Could not switch to MST Testnet. Please approve in your BridgeKey wallet.");
@@ -811,6 +822,9 @@ export const App: React.FC = () => {
       setIsLiveConnected(true);
       setCurrentChainId(MST_MAINNET_CONFIG.chainId);
       setNetworkName("MST Mainnet (4646)");
+      const mainnetVault = "0x9a81aED1b3D2d4c85A0ea8FC6129D17b2fFed339";
+      setVaultAddress(mainnetVault);
+      syncOnChainVault(mainnetVault);
       setStatusMessage("✔ Switched network to MST Mainnet.");
     } else {
       setStatusMessage("Could not switch to MST Mainnet. Please approve in your BridgeKey wallet.");
@@ -1604,63 +1618,79 @@ export const App: React.FC = () => {
     const wei = validation.parsedWei;
     const formattedAmount = formDepositAmount.trim();
 
-    if (isContractDeployedOnChain && account) {
-      if (!verifyTxPreflight(vaultAddress, "deposit funds")) {
-        return;
-      }
-      try {
-        setTxStage("requesting");
-        setTxStageMessage(`1/5: Requesting deposit of ${formattedAmount} ${currencySymbol} in your BridgeKey wallet...`);
-        const vault = await getActiveContract(vaultAddress, ClubVaultABI);
-        if (!vault) throw new Error("BridgeKey wallet provider not available.");
-
-        setTxStage("signing");
-        setTxStageMessage(`2/5: Awaiting wallet signature for deposit of ${formattedAmount} ${currencySymbol} to ${vaultAddress}...`);
-        const tx = await vault.deposit({ value: wei });
-
-        setTxStage("broadcasting");
-        setActiveTxHash(tx.hash);
-        setTxStageMessage(`3/5: Broadcast to ${networkName}! Tx: ${tx.hash.slice(0, 10)}... (Awaiting confirmation)`);
-
-        setTxStage("confirming");
-        setTxStageMessage("4/5: Awaiting block confirmation on MST Blockchain...");
-        const receipt = await tx.wait();
-
-        setTxStage("success");
-        setTxStageMessage(`5/5: Deposit confirmed on ${networkName}! (Block ${receipt.blockNumber || "mined"})`);
-
-        const depTx: TransactionRecord = {
-          id: `tx-${Date.now()}`,
-          type: "DEPOSIT",
-          amount: `${formattedAmount} ${currencySymbol}`,
-          fromOrTo: account,
-          txHash: receipt.hash || tx.hash,
-          timestamp: Math.floor(Date.now() / 1000),
-          status: "CONFIRMED",
-        };
-        setLiveTransactions((t) => [depTx, ...t.filter((x) => x.txHash !== depTx.txHash)]);
-        // Only clear input after confirmed on-chain transaction outcome
-        setFormDepositAmount("");
-        setStatusMessage(`Deposited ${formattedAmount} ${currencySymbol} successfully on ${networkName}!`);
-        await syncOnChainVault();
-      } catch (err: any) {
-        console.error("Deposit failed:", err);
-        const parsed = parseWalletError(err);
-        setTxStage("error");
-        if (parsed.isExtensionReload) {
-          setIsExtensionReloadRequired(true);
-          setTxStageMessage("BridgeKey extension was reloaded in the background. Please refresh this page to reconnect.");
-          setStatusMessage("Notice: BridgeKey extension was updated in the background. Please refresh this page.");
-        } else if (parsed.isUserReject) {
-          setTxStageMessage("Deposit transaction was rejected by user in BridgeKey wallet.");
-          setStatusMessage("Notice: Deposit was cancelled in your wallet. The entered amount has been preserved.");
-        } else {
-          setTxStageMessage(`Deposit failed: ${parsed.message}`);
-          setStatusMessage(`Deposit transaction failed: ${parsed.message}`);
-        }
-      }
+    if (!account) {
+      setStatusMessage(`Please connect your BridgeKey wallet to deposit ${currencySymbol} into the vault.`);
+      setShowBridgeKeyModal(true);
       return;
     }
+
+    let targetVault = vaultAddress;
+    if (currentChainId === 4646 && targetVault.toLowerCase() !== "0x9a81aed1b3d2d4c85a0ea8fc6129d17b2ffed339") {
+      targetVault = "0x9a81aED1b3D2d4c85A0ea8FC6129D17b2fFed339";
+      setVaultAddress(targetVault);
+      await syncOnChainVault(targetVault);
+    } else if (currentChainId === 91562037 && targetVault.toLowerCase() === "0x9a81aed1b3d2d4c85a0ea8fc6129d17b2ffed339") {
+      targetVault = "0x8442bF7dE2d0FF9aF4136a83Cf20BE559b6Fb5C9";
+      setVaultAddress(targetVault);
+      await syncOnChainVault(targetVault);
+    }
+
+    if (!verifyTxPreflight(targetVault, "deposit funds")) {
+      return;
+    }
+
+    try {
+      setTxStage("requesting");
+      setTxStageMessage(`1/5: Requesting deposit of ${formattedAmount} ${currencySymbol} in your BridgeKey wallet...`);
+      const vault = await getActiveContract(targetVault, ClubVaultABI);
+      if (!vault) throw new Error("BridgeKey wallet provider not available.");
+
+      setTxStage("signing");
+      setTxStageMessage(`2/5: Awaiting wallet signature for deposit of ${formattedAmount} ${currencySymbol} to ${targetVault}...`);
+      const tx = await vault.deposit({ value: wei });
+
+      setTxStage("broadcasting");
+      setActiveTxHash(tx.hash);
+      setTxStageMessage(`3/5: Broadcast to ${networkName}! Tx: ${tx.hash.slice(0, 10)}... (Awaiting confirmation)`);
+
+      setTxStage("confirming");
+      setTxStageMessage("4/5: Awaiting block confirmation on MST Blockchain...");
+      const receipt = await tx.wait();
+
+      setTxStage("success");
+      setTxStageMessage(`5/5: Deposit confirmed on ${networkName}! (Block ${receipt.blockNumber || "mined"})`);
+
+      const depTx: TransactionRecord = {
+        id: `tx-${Date.now()}`,
+        type: "DEPOSIT",
+        amount: `${formattedAmount} ${currencySymbol}`,
+        fromOrTo: account,
+        txHash: receipt.hash || tx.hash,
+        timestamp: Math.floor(Date.now() / 1000),
+        status: "CONFIRMED",
+      };
+      setLiveTransactions((t) => [depTx, ...t.filter((x) => x.txHash !== depTx.txHash)]);
+      // Only clear input after confirmed on-chain transaction outcome
+      setFormDepositAmount("");
+      setStatusMessage(`Deposited ${formattedAmount} ${currencySymbol} successfully on ${networkName}!`);
+      await syncOnChainVault(targetVault);
+    } catch (err: any) {
+      console.error("Deposit failed:", err);
+      const parsed = parseWalletError(err);
+      setTxStage("error");
+      if (parsed.isExtensionReload) {
+        setIsExtensionReloadRequired(true);
+        setTxStageMessage("BridgeKey extension was reloaded in the background. Please refresh this page to reconnect.");
+        setStatusMessage("Notice: BridgeKey extension was updated in the background. Please refresh this page.");
+      } else if (parsed.isUserReject) {
+        setTxStageMessage("Deposit transaction was rejected by user in BridgeKey wallet.");
+        setStatusMessage("Notice: Deposit was cancelled in your wallet. The entered amount has been preserved.");
+      } else {
+        setTxStageMessage(`Deposit failed: ${parsed.message}`);
+        setStatusMessage(`Deposit transaction failed: ${parsed.message}`);
+      }
+    }
+    return;
 
     // Demo fallback
     const amtNumber = Number(formattedAmount);
@@ -2504,12 +2534,13 @@ export const App: React.FC = () => {
             <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap", alignItems: "center" }}>
               {/* Vault Selector Pills */}
               <div style={{ display: "flex", gap: "0.3rem", background: "rgba(255,255,255,0.04)", padding: "0.25rem", borderRadius: "8px", border: "1px solid var(--border-color)" }}>
-                {CONTRACT_ADDRESSES.GenesisVault && (
+                {currentChainId === MST_MAINNET_CONFIG.chainId ? (
                   <button
-                    id="btn-select-v1-vault"
+                    id="btn-select-mainnet-vault"
                     onClick={() => {
-                      setVaultAddress(CONTRACT_ADDRESSES.GenesisVault!);
-                      syncOnChainVault(CONTRACT_ADDRESSES.GenesisVault!);
+                      const mainnetVault = "0x9a81aED1b3D2d4c85A0ea8FC6129D17b2fFed339";
+                      setVaultAddress(mainnetVault);
+                      syncOnChainVault(mainnetVault);
                     }}
                     style={{
                       padding: "0.4rem 0.7rem",
@@ -2517,55 +2548,56 @@ export const App: React.FC = () => {
                       borderRadius: "6px",
                       border: "none",
                       cursor: "pointer",
-                      background: vaultAddress.toLowerCase() === CONTRACT_ADDRESSES.GenesisVault?.toLowerCase() ? "var(--accent-primary)" : "transparent",
-                      color: vaultAddress.toLowerCase() === CONTRACT_ADDRESSES.GenesisVault?.toLowerCase() ? "#fff" : "var(--text-secondary)",
+                      background: "var(--accent-emerald)",
+                      color: "#fff",
                       fontWeight: 600,
                     }}
                   >
-                    V1 Genesis
+                    Mainnet Genesis Vault (2-of-2)
                   </button>
-                )}
-                {CONTRACT_ADDRESSES.GenesisVaultV2 && (
-                  <button
-                    id="btn-select-v2-vault"
-                    onClick={() => {
-                      setVaultAddress(CONTRACT_ADDRESSES.GenesisVaultV2!);
-                      syncOnChainVault(CONTRACT_ADDRESSES.GenesisVaultV2!);
-                    }}
-                    style={{
-                      padding: "0.4rem 0.7rem",
-                      fontSize: "0.78rem",
-                      borderRadius: "6px",
-                      border: "none",
-                      cursor: "pointer",
-                      background: vaultAddress.toLowerCase() === CONTRACT_ADDRESSES.GenesisVaultV2?.toLowerCase() ? "var(--accent-emerald)" : "transparent",
-                      color: vaultAddress.toLowerCase() === CONTRACT_ADDRESSES.GenesisVaultV2?.toLowerCase() ? "#fff" : "var(--text-secondary)",
-                      fontWeight: 600,
-                    }}
-                  >
-                    V2 Genesis
-                  </button>
-                )}
-                {CONTRACT_ADDRESSES.testRelayerVault2of2 && (
-                  <button
-                    id="btn-select-2of2-vault"
-                    onClick={() => {
-                      setVaultAddress(CONTRACT_ADDRESSES.testRelayerVault2of2!);
-                      syncOnChainVault(CONTRACT_ADDRESSES.testRelayerVault2of2!);
-                    }}
-                    style={{
-                      padding: "0.4rem 0.7rem",
-                      fontSize: "0.78rem",
-                      borderRadius: "6px",
-                      border: "none",
-                      cursor: "pointer",
-                      background: vaultAddress.toLowerCase() === CONTRACT_ADDRESSES.testRelayerVault2of2?.toLowerCase() ? "#f59e0b" : "transparent",
-                      color: vaultAddress.toLowerCase() === CONTRACT_ADDRESSES.testRelayerVault2of2?.toLowerCase() ? "#000" : "var(--text-secondary)",
-                      fontWeight: 600,
-                    }}
-                  >
-                    2-of-2 Test Vault
-                  </button>
+                ) : (
+                  <>
+                    <button
+                      id="btn-select-v2-vault"
+                      onClick={() => {
+                        const testnetV2 = "0x8442bF7dE2d0FF9aF4136a83Cf20BE559b6Fb5C9";
+                        setVaultAddress(testnetV2);
+                        syncOnChainVault(testnetV2);
+                      }}
+                      style={{
+                        padding: "0.4rem 0.7rem",
+                        fontSize: "0.78rem",
+                        borderRadius: "6px",
+                        border: "none",
+                        cursor: "pointer",
+                        background: vaultAddress.toLowerCase() === "0x8442bf7de2d0ff9af4136a83cf20be559b6fb5c9" ? "var(--accent-emerald)" : "transparent",
+                        color: vaultAddress.toLowerCase() === "0x8442bf7de2d0ff9af4136a83cf20be559b6fb5c9" ? "#fff" : "var(--text-secondary)",
+                        fontWeight: 600,
+                      }}
+                    >
+                      Testnet V2 Genesis
+                    </button>
+                    <button
+                      id="btn-select-2of2-vault"
+                      onClick={() => {
+                        const test2of2 = "0x90e309A5246B37bBC79224A1449D25CC29ef88bE";
+                        setVaultAddress(test2of2);
+                        syncOnChainVault(test2of2);
+                      }}
+                      style={{
+                        padding: "0.4rem 0.7rem",
+                        fontSize: "0.78rem",
+                        borderRadius: "6px",
+                        border: "none",
+                        cursor: "pointer",
+                        background: vaultAddress.toLowerCase() === "0x90e309a5246b37bbc79224a1449d25cc29ef88be" ? "#f59e0b" : "transparent",
+                        color: vaultAddress.toLowerCase() === "0x90e309a5246b37bbc79224a1449d25cc29ef88be" ? "#000" : "var(--text-secondary)",
+                        fontWeight: 600,
+                      }}
+                    >
+                      2-of-2 Test Vault
+                    </button>
+                  </>
                 )}
               </div>
               <button
@@ -3452,12 +3484,23 @@ export const App: React.FC = () => {
                   <span style={{ color: "var(--text-secondary)" }}>{currentChainId} ({currentChainId === 4646 ? "MST Mainnet" : "MST Testnet"})</span>
                 </div>
                 <div style={{ display: "flex", flexDirection: "column", gap: "2px", marginBottom: "0.3rem" }}>
-                  <span style={{ color: "var(--text-muted)" }}>Destination Vault Contract:</span>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                    <span style={{ color: "var(--text-muted)" }}>Destination Vault Contract:</span>
+                    {isContractDeployedOnChain ? (
+                      <span style={{ fontSize: "0.72rem", color: "var(--accent-emerald)", fontWeight: 600 }}>
+                        ✓ Verified On-Chain
+                      </span>
+                    ) : (
+                      <span style={{ fontSize: "0.72rem", color: "var(--accent-crimson)", fontWeight: 600 }}>
+                        ⚠ Not Deployed on {currentChainId === 4646 ? "Mainnet" : "Testnet"}
+                      </span>
+                    )}
+                  </div>
                   <a
                     href={(currentChainId === 4646 ? "https://mstscan.com" : "https://testnet.mstscan.com") + `/address/${vaultAddress}`}
                     target="_blank"
                     rel="noreferrer"
-                    style={{ color: "var(--accent-crimson)", wordBreak: "break-all", fontSize: "0.75rem", textDecoration: "none" }}
+                    style={{ color: "#38bdf8", wordBreak: "break-all", fontSize: "0.75rem", textDecoration: "underline" }}
                     title="View destination contract on MSTScan"
                   >
                     {vaultAddress} ↗
@@ -3471,14 +3514,14 @@ export const App: React.FC = () => {
                   style={{
                     padding: "0.5rem",
                     borderRadius: "4px",
-                    background: "rgba(245, 158, 11, 0.08)",
-                    border: "1px solid rgba(245, 158, 11, 0.25)",
-                    color: "#F59E0B",
+                    background: isContractDeployedOnChain ? "rgba(16, 185, 129, 0.08)" : "rgba(245, 158, 11, 0.08)",
+                    border: isContractDeployedOnChain ? "1px solid rgba(16, 185, 129, 0.25)" : "1px solid rgba(245, 158, 11, 0.25)",
+                    color: isContractDeployedOnChain ? "var(--accent-emerald)" : "#F59E0B",
                     fontSize: "0.72rem",
                     lineHeight: 1.4,
                   }}
                 >
-                  ⚠️ <strong>Wallet Notice:</strong> BridgeKey may warn that the contract function is unrecognized because source code on MSTScan is unverified. Please verify the destination address above matches your Genesis Vault before approving.
+                  <strong>Active Network:</strong> {currentChainId === 4646 ? "MST Mainnet (4646)" : "MST Testnet (91562037)"}. Contributed {currencySymbol} is immediately credited to Available Funds on-chain upon block confirmation.
                 </div>
               </div>
 
