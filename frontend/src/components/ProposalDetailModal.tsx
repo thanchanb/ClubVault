@@ -233,52 +233,99 @@ export const ProposalDetailModal: React.FC<ProposalDetailModalProps> = ({
           <div style={{ display: "flex", gap: "0.6rem", flexWrap: "wrap", alignItems: "center" }}>
             {isPending && (
               <>
-                {onGaslessVote && (
-                  <button
-                    id="detail-modal-gasless-vote-btn"
-                    className="btn btn-secondary"
-                    style={{
-                      border: "1px solid var(--accent-emerald)",
-                      color: "var(--accent-emerald)",
-                      background: "rgba(16, 185, 129, 0.12)",
-                      display: "inline-flex",
-                      alignItems: "center",
-                      gap: "0.4rem",
-                      padding: "0.5rem 0.9rem",
-                      fontWeight: 700,
-                    }}
-                    onClick={() => {
-                      onClose();
-                      onGaslessVote(proposal);
-                    }}
-                    title="Cast Gas-Sponsored Vote via EIP-712 Relayer (0 Gas Paid by Voter)"
-                  >
-                    <Fuel style={{ width: "16px", height: "16px" }} />
-                    <span>Gasless Vote (0 Gas)</span>
-                  </button>
+                {Boolean(
+                  (account && proposal.proposer && proposal.proposer.toLowerCase() === account.toLowerCase()) ||
+                  proposal.hasCurrentUserVoted
+                ) ? (
+                  <div style={{ display: "flex", alignItems: "center", gap: "0.6rem", flexWrap: "wrap" }}>
+                    <div
+                      id="detail-modal-voted-badge"
+                      style={{
+                        display: "inline-flex",
+                        alignItems: "center",
+                        gap: "0.4rem",
+                        padding: "0.5rem 0.9rem",
+                        borderRadius: "8px",
+                        background: "rgba(16, 185, 129, 0.15)",
+                        border: "1px solid rgba(16, 185, 129, 0.35)",
+                        color: "var(--accent-emerald)",
+                        fontSize: "0.82rem",
+                        fontWeight: 700,
+                      }}
+                    >
+                      <CheckCircle2 style={{ width: "16px", height: "16px" }} />
+                      <span>
+                        {account && proposal.proposer && proposal.proposer.toLowerCase() === account.toLowerCase()
+                          ? "You Approved as Proposer"
+                          : "You Have Already Voted"}
+                      </span>
+                    </div>
+                    {proposal.approvalsCount < (requiredApprovals || 2) && (
+                      <span
+                        style={{
+                          fontSize: "0.8rem",
+                          color: "var(--accent-amber)",
+                          fontWeight: 600,
+                          display: "inline-flex",
+                          alignItems: "center",
+                          gap: "0.3rem",
+                        }}
+                      >
+                        <Clock style={{ width: "14px", height: "14px" }} />
+                        Awaiting 2nd Member ({proposal.approvalsCount}/{requiredApprovals || 2})
+                      </span>
+                    )}
+                  </div>
+                ) : (
+                  <>
+                    {onGaslessVote && (
+                      <button
+                        id="detail-modal-gasless-vote-btn"
+                        className="btn btn-secondary"
+                        style={{
+                          border: "1px solid var(--accent-emerald)",
+                          color: "var(--accent-emerald)",
+                          background: "rgba(16, 185, 129, 0.12)",
+                          display: "inline-flex",
+                          alignItems: "center",
+                          gap: "0.4rem",
+                          padding: "0.5rem 0.9rem",
+                          fontWeight: 700,
+                        }}
+                        onClick={() => {
+                          onClose();
+                          onGaslessVote(proposal);
+                        }}
+                        title="Cast Gas-Sponsored Vote via EIP-712 Relayer (0 Gas Paid by Voter)"
+                      >
+                        <Fuel style={{ width: "16px", height: "16px" }} />
+                        <span>Gasless Vote (0 Gas)</span>
+                      </button>
+                    )}
+                    <button
+                      id="detail-modal-direct-vote-btn"
+                      className="btn btn-success"
+                      onClick={() => {
+                        onVote(proposal.id, true);
+                        onClose();
+                      }}
+                    >
+                      <CheckCircle2 style={{ width: "16px", height: "16px" }} />
+                      <span>Direct Vote</span>
+                    </button>
+                    <button
+                      id="detail-modal-reject-vote-btn"
+                      className="btn btn-danger"
+                      onClick={() => {
+                        onVote(proposal.id, false);
+                        onClose();
+                      }}
+                    >
+                      <XCircle style={{ width: "16px", height: "16px" }} />
+                      <span>Reject</span>
+                    </button>
+                  </>
                 )}
-                <button
-                  id="detail-modal-direct-vote-btn"
-                  className="btn btn-success"
-                  onClick={() => {
-                    onVote(proposal.id, true);
-                    onClose();
-                  }}
-                >
-                  <CheckCircle2 style={{ width: "16px", height: "16px" }} />
-                  <span>Direct Vote</span>
-                </button>
-                <button
-                  id="detail-modal-reject-vote-btn"
-                  className="btn btn-danger"
-                  onClick={() => {
-                    onVote(proposal.id, false);
-                    onClose();
-                  }}
-                >
-                  <XCircle style={{ width: "16px", height: "16px" }} />
-                  <span>Reject</span>
-                </button>
               </>
             )}
 

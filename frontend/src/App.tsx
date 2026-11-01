@@ -109,6 +109,7 @@ export interface ProposalData {
   receiptApprovals: number;
   receiptRejections: number;
   txHash?: string;
+  hasCurrentUserVoted?: boolean;
 }
 
 export interface TransactionRecord {
@@ -222,6 +223,7 @@ export const App: React.FC = () => {
   const [txStageMessage, setTxStageMessage] = useState<string>("");
   const [activeTxHash, setActiveTxHash] = useState<string | null>(null);
   const [votingProposalId, setVotingProposalId] = useState<number | null>(null);
+  const [userVotedProposalIds, setUserVotedProposalIds] = useState<number[]>([]);
 
   // Treasury Metrics
   const [vaultBalance, setVaultBalance] = useState<string>("15.5");
@@ -953,6 +955,16 @@ export const App: React.FC = () => {
       const loaded: ProposalData[] = [];
       for (let i = 1; i <= count; i++) {
         const p = await vault.getProposal(i);
+        let hasVoted = false;
+        if (account && ethers.isAddress(account)) {
+          try {
+            hasVoted = await vault.hasVotedOnProposal(i, account);
+          } catch {
+            hasVoted = Boolean(p.proposer && p.proposer.toLowerCase() === account.toLowerCase());
+          }
+        } else {
+          hasVoted = false;
+        }
         loaded.push({
           id: Number(p.id),
           proposalType: Number(p.proposalType),
@@ -971,6 +983,7 @@ export const App: React.FC = () => {
           receiptDescription: p.receiptDescription,
           receiptApprovals: Number(p.receiptApprovals),
           receiptRejections: Number(p.receiptRejections),
+          hasCurrentUserVoted: hasVoted,
         });
       }
       // Always synchronize state: if count is 0, proposals list becomes empty to clear demo mock data
@@ -1243,6 +1256,17 @@ export const App: React.FC = () => {
     // 1. In-memory pre-vote guard using existing proposal state
     const existingProp = proposals.find((p) => p.id === id);
     if (existingProp) {
+      const isProposer = Boolean(account && existingProp.proposer && existingProp.proposer.toLowerCase() === account.toLowerCase());
+      const hasVoted = Boolean(isProposer || existingProp.hasCurrentUserVoted || userVotedProposalIds.includes(id));
+      if (hasVoted) {
+        setTxStage("error");
+        setTxStageMessage(
+          isProposer
+            ? "Your vote was already auto-cast as proposer. The second signer must approve to reach quorum."
+            : "You have already voted on this proposal. Awaiting other member approvals."
+        );
+        return;
+      }
       if (existingProp.status === ProposalStatus.APPROVED) {
         setTxStage("error");
         setTxStageMessage("Quorum Reached — This proposal is approved and ready for execution.");
@@ -1274,6 +1298,11 @@ export const App: React.FC = () => {
 
         // 2. Authoritative live on-chain status verification before requesting wallet signature
         try {
+          if (account && (await vault.hasVotedOnProposal(id, account))) {
+            setTxStage("error");
+            setTxStageMessage("Your vote is already recorded on-chain. Second member approval is required to reach quorum.");
+            return;
+          }
           const onChainProp = await vault.getProposal(id);
           const onChainStatus = Number(onChainProp.status);
           if (onChainStatus === ProposalStatus.APPROVED) {
@@ -1291,7 +1320,10 @@ export const App: React.FC = () => {
             setTxStageMessage("Voting is closed for this proposal.");
             return;
           }
-        } catch {
+        } catch (checkErr: any) {
+          if (checkErr?.message?.includes("quorum") || checkErr?.message?.includes("recorded")) {
+            return;
+          }
           setTxStage("error");
           setTxStageMessage("Unable to verify proposal status. Please refresh and try again.");
           return;
@@ -1309,6 +1341,7 @@ export const App: React.FC = () => {
         setTxStageMessage("4/5: Awaiting block confirmation on MST Blockchain...");
         await tx.wait();
 
+        setUserVotedProposalIds((prev) => [...prev, id]);
         setTxStage("success");
         setTxStageMessage("5/5: Vote recorded on-chain on MST Testnet!");
         setStatusMessage(`Vote recorded on Proposal #${id} on MST Testnet.`);
@@ -3170,59 +3203,113 @@ export const App: React.FC = () => {
 
                           {p.status === ProposalStatus.PENDING && (
                             <>
-                              <button
-                                id={`vote-yes-${p.id}`}
-                                className="btn btn-success"
-                                disabled={txStage !== "idle"}
-                                onClick={() => handleVoteProposal(p.id, true)}
-                                title="Direct On-Chain Vote (Requires Gas)"
-                                style={{ minWidth: "95px", display: "inline-flex", alignItems: "center", justifyContent: "center", gap: "0.4rem" }}
-                              >
-                                {votingProposalId === p.id && (txStage === "requesting" || txStage === "signing") ? (
-                                  <>
-                                    <RefreshCw style={{ width: "13px", height: "13px", animation: "spin 1.2s linear infinite" }} />
-                                    <span>Confirming...</span>
-                                  </>
-                                ) : (
-                                  "Approve"
-                                )}
-                              </button>
-                              <button
-                                id={`vote-no-${p.id}`}
-                                className="btn btn-danger"
-                                disabled={txStage !== "idle"}
-                                onClick={() => handleVoteProposal(p.id, false)}
-                                title="Direct On-Chain Vote (Requires Gas)"
-                                style={{ minWidth: "90px", display: "inline-flex", alignItems: "center", justifyContent: "center", gap: "0.4rem" }}
-                              >
-                                {votingProposalId === p.id && (txStage === "requesting" || txStage === "signing") ? (
-                                  <>
-                                    <RefreshCw style={{ width: "13px", height: "13px", animation: "spin 1.2s linear infinite" }} />
-                                    <span>Confirming...</span>
-                                  </>
-                                ) : (
-                                  "Reject"
-                                )}
-                              </button>
-                              <button
-                                id={`vote-gasless-${p.id}`}
-                                className="btn btn-secondary"
-                                style={{
-                                  border: "1px solid var(--accent-emerald)",
-                                  color: "var(--accent-emerald)",
-                                  display: "inline-flex",
-                                  alignItems: "center",
-                                  gap: "0.35rem",
-                                  padding: "0.45rem 0.75rem",
-                                  fontSize: "0.8rem",
-                                  fontWeight: "600",
-                                }}
-                                onClick={() => setGaslessVoteProposal(p)}
-                                title="Gas-Sponsored Vote via EIP-712 Relayer (0 Gas for Voter)"
-                              >
-                                <Fuel style={{ width: "13px", height: "13px" }} />
-                                <span>Gasless Vote</span>
-                              </button>
+                              {Boolean(
+                                (account && p.proposer && p.proposer.toLowerCase() === account.toLowerCase()) ||
+                                p.hasCurrentUserVoted ||
+                                userVotedProposalIds.includes(p.id)
+                              ) ? (
+                                <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", flexWrap: "wrap" }}>
+                                  <div
+                                    id={`voted-badge-${p.id}`}
+                                    style={{
+                                      display: "inline-flex",
+                                      alignItems: "center",
+                                      gap: "0.4rem",
+                                      padding: "0.45rem 0.8rem",
+                                      borderRadius: "8px",
+                                      background: "rgba(16, 185, 129, 0.15)",
+                                      border: "1px solid rgba(16, 185, 129, 0.35)",
+                                      color: "var(--accent-emerald)",
+                                      fontSize: "0.8rem",
+                                      fontWeight: 600,
+                                    }}
+                                    title="Your affirmative vote is already recorded on-chain."
+                                  >
+                                    <CheckCircle2 style={{ width: "14px", height: "14px" }} />
+                                    <span>
+                                      {account && p.proposer && p.proposer.toLowerCase() === account.toLowerCase()
+                                        ? "You Approved (Proposer)"
+                                        : "You Have Voted"}
+                                    </span>
+                                  </div>
+                                  {p.approvalsCount < (requiredApprovals || 2) && (
+                                    <div
+                                      style={{
+                                        display: "inline-flex",
+                                        alignItems: "center",
+                                        gap: "0.35rem",
+                                        padding: "0.45rem 0.75rem",
+                                        borderRadius: "8px",
+                                        background: "rgba(245, 158, 11, 0.12)",
+                                        border: "1px solid rgba(245, 158, 11, 0.3)",
+                                        color: "var(--accent-amber)",
+                                        fontSize: "0.78rem",
+                                        fontWeight: 600,
+                                      }}
+                                      title={`This multi-sig vault requires ${requiredApprovals || 2} member approvals. Switch to Member 2 in BridgeKey to cast the second vote.`}
+                                    >
+                                      <Clock style={{ width: "13px", height: "13px" }} />
+                                      <span>Awaiting 2nd Member ({p.approvalsCount}/{requiredApprovals || 2})</span>
+                                    </div>
+                                  )}
+                                </div>
+                              ) : (
+                                <>
+                                  <button
+                                    id={`vote-yes-${p.id}`}
+                                    className="btn btn-success"
+                                    disabled={txStage !== "idle"}
+                                    onClick={() => handleVoteProposal(p.id, true)}
+                                    title="Direct On-Chain Vote (Requires Gas)"
+                                    style={{ minWidth: "95px", display: "inline-flex", alignItems: "center", justifyContent: "center", gap: "0.4rem" }}
+                                  >
+                                    {votingProposalId === p.id && (txStage === "requesting" || txStage === "signing") ? (
+                                      <>
+                                        <RefreshCw style={{ width: "13px", height: "13px", animation: "spin 1.2s linear infinite" }} />
+                                        <span>Confirming...</span>
+                                      </>
+                                    ) : (
+                                      "Approve"
+                                    )}
+                                  </button>
+                                  <button
+                                    id={`vote-no-${p.id}`}
+                                    className="btn btn-danger"
+                                    disabled={txStage !== "idle"}
+                                    onClick={() => handleVoteProposal(p.id, false)}
+                                    title="Direct On-Chain Vote (Requires Gas)"
+                                    style={{ minWidth: "90px", display: "inline-flex", alignItems: "center", justifyContent: "center", gap: "0.4rem" }}
+                                  >
+                                    {votingProposalId === p.id && (txStage === "requesting" || txStage === "signing") ? (
+                                      <>
+                                        <RefreshCw style={{ width: "13px", height: "13px", animation: "spin 1.2s linear infinite" }} />
+                                        <span>Confirming...</span>
+                                      </>
+                                    ) : (
+                                      "Reject"
+                                    )}
+                                  </button>
+                                  <button
+                                    id={`vote-gasless-${p.id}`}
+                                    className="btn btn-secondary"
+                                    style={{
+                                      border: "1px solid var(--accent-emerald)",
+                                      color: "var(--accent-emerald)",
+                                      display: "inline-flex",
+                                      alignItems: "center",
+                                      gap: "0.35rem",
+                                      padding: "0.45rem 0.75rem",
+                                      fontSize: "0.8rem",
+                                      fontWeight: "600",
+                                    }}
+                                    onClick={() => setGaslessVoteProposal(p)}
+                                    title="Gas-Sponsored Vote via EIP-712 Relayer (0 Gas for Voter)"
+                                  >
+                                    <Fuel style={{ width: "13px", height: "13px" }} />
+                                    <span>Gasless Vote</span>
+                                  </button>
+                                </>
+                              )}
                             </>
                           )}
 

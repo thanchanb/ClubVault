@@ -22,8 +22,13 @@ export const ActionInbox: React.FC<ActionInboxProps> = ({
   requiredApprovals = 2,
 }) => {
   // 1. Proposals requiring vote from connected account
-  // In our smart contract model, any PENDING proposal needs member votes
-  const pendingVotes = proposals.filter((p) => p.status === ProposalStatus.PENDING);
+  // Exclude proposals where the connected account is the proposer (auto-approved on creation) or has already voted
+  const pendingVotes = proposals.filter((p) => {
+    if (p.status !== ProposalStatus.PENDING) return false;
+    if (account && p.proposer && p.proposer.toLowerCase() === account.toLowerCase()) return false;
+    if ((p as any).hasCurrentUserVoted) return false;
+    return true;
+  });
 
   // 2. Advances requiring receipt upload (user is recipient and advance is disbursed)
   const pendingReceiptUploads = proposals.filter(
