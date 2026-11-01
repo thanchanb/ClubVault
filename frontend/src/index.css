@@ -426,6 +426,10 @@ h1, h2, h3, h4, h5, h6 {
   align-items: center;
   justify-content: center;
   flex-shrink: 0;
+  width: 36px;
+  height: 36px;
+  border-radius: 50% !important;
+  padding: 0 !important;
 }
 
 /* Network pill */
@@ -468,7 +472,7 @@ h1, h2, h3, h4, h5, h6 {
   gap: 0.45rem;
   padding: 0.45rem 0.85rem;
   background: var(--bg-card);
-  border: 1px solid rgba(255, 48, 59, 0.4);
+  border: 1.5px solid rgba(255, 48, 59, 0.75);
   border-radius: var(--radius-pill);
   font-size: 0.78rem;
   font-weight: 600;
@@ -477,7 +481,7 @@ h1, h2, h3, h4, h5, h6 {
   cursor: pointer;
   white-space: nowrap;
   flex-shrink: 0;
-  box-shadow: 0 0 14px -3px rgba(255, 48, 59, 0.22);
+  box-shadow: 0 0 14px -3px rgba(255, 48, 59, 0.35);
   transition: var(--transition);
 }
 
@@ -1384,9 +1388,9 @@ textarea.form-control {
 }
 
 /* Responsive adjustments */
-@media (max-width: 1440px) {
+@media (max-width: 1600px) {
   .cv-navbar {
-    padding: 0.6rem 0.85rem;
+    padding: 0.55rem 0.85rem;
   }
   .cv-nav-inner {
     max-width: 100%;
@@ -1403,6 +1407,11 @@ textarea.form-control {
   }
   .cv-mobile-menu-btn {
     display: flex !important;
+    width: 36px;
+    height: 36px;
+    border-radius: 50% !important;
+    padding: 0 !important;
+    flex-shrink: 0;
   }
   .cv-nav-actions {
     gap: 0.3rem;
@@ -1410,9 +1419,18 @@ textarea.form-control {
   .cv-btn-label-collapse {
     display: none;
   }
+  #btn-deploy-mainnet {
+    padding: 0.38rem 0.65rem !important;
+    font-size: 0.78rem !important;
+  }
+  .network-badge {
+    padding: 0.38rem 0.6rem !important;
+    font-size: 0.76rem !important;
+  }
   .cv-wallet-badge {
-    padding: 0.35rem 0.68rem;
+    padding: 0.38rem 0.72rem;
     font-size: 0.76rem;
+    border: 1.5px solid rgba(255, 48, 59, 0.75);
     flex-shrink: 0;
   }
 }

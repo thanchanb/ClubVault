@@ -321,12 +321,14 @@ export const Navbar: React.FC<NavbarProps> = ({
             onClick={() => setMobileMenuOpen(!mobileMenuOpen)}
             className="btn btn-secondary cv-mobile-menu-btn"
             style={{
-              padding: "0.5rem",
-              borderRadius: "var(--radius-pill)",
+              padding: 0,
+              borderRadius: "50%",
+              display: "flex",
               alignItems: "center",
               justifyContent: "center",
               width: "36px",
               height: "36px",
+              flexShrink: 0,
             }}
             aria-label="Toggle mobile navigation"
           >
