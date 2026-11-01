@@ -139,20 +139,61 @@ export const App: React.FC = () => {
   const isConnectedByUserRef = useRef<boolean>(false);
   const currencySymbol = currentChainId === MST_MAINNET_CONFIG.chainId ? "MSTC" : "tMSTC";
 
-  // Guarantee clean DISCONNECTED state on every boot, reload, and refresh
+  // On page load/refresh: silently auto-reconnect if wallet is already unlocked (no popup shown)
   useEffect(() => {
-    isConnectedByUserRef.current = false;
-    setWalletStatus("DISCONNECTED");
-    setAccount(null);
-    setAccountBalance("0.00");
-    try {
-      localStorage.removeItem("clubvault_connected_account");
-      localStorage.removeItem("clubvault_connected_balance");
-      localStorage.removeItem("clubvault_preferred_wallet");
-      sessionStorage.removeItem("clubvault_connected_account");
-      sessionStorage.removeItem("clubvault_connected_balance");
-      sessionStorage.removeItem("clubvault_preferred_wallet");
-    } catch {}
+    const tryAutoReconnect = async () => {
+      try {
+        const provider = getBridgeKeyProvider();
+        if (!provider) {
+          setWalletStatus("DISCONNECTED");
+          return;
+        }
+
+        // eth_accounts is a silent, no-popup read — returns [] if wallet is locked/disconnected
+        const accounts: string[] = await provider.request({ method: "eth_accounts" });
+        if (!accounts || accounts.length === 0) {
+          setWalletStatus("DISCONNECTED");
+          return;
+        }
+
+        const checksumAccount = ethers.getAddress(accounts[0]);
+        const chainIdHex: string = await provider.request({ method: "eth_chainId" });
+        const chainId = parseInt(chainIdHex, 16);
+        const isMst = chainId === MST_TESTNET_CONFIG.chainId || chainId === MST_MAINNET_CONFIG.chainId;
+
+        isConnectedByUserRef.current = true;
+        setAccount(checksumAccount);
+        setIsCorrectNetwork(isMst);
+        setIsLiveConnected(isMst);
+        setWalletStatus(isMst ? "CONNECTED" : "WRONG_NETWORK");
+
+        if (isMst) {
+          setCurrentChainId(chainId);
+          setNetworkName(chainId === MST_MAINNET_CONFIG.chainId ? "MST Mainnet (4646)" : "MST Testnet (91562037)");
+
+          // Restore last selected vault from localStorage, or fall back to default
+          const savedVault = localStorage.getItem("clubvault_last_vault");
+          const defaultVault =
+            chainId === MST_MAINNET_CONFIG.chainId
+              ? "0x9a81aED1b3D2d4c85A0ea8FC6129D17b2fFed339"
+              : "0x8442bF7dE2d0FF9aF4136a83Cf20BE559b6Fb5C9";
+          const targetVault = savedVault || defaultVault;
+          setVaultAddress(targetVault);
+
+          // Reload all proposals & vault metrics from the blockchain
+          syncOnChainVault(targetVault);
+
+          // Fetch wallet balance asynchronously in background
+          fetchWalletBalance(provider, checksumAccount, chainId)
+            .then((b) => { if (isConnectedByUserRef.current) setAccountBalance(b); })
+            .catch(() => {});
+        }
+      } catch {
+        setWalletStatus("DISCONNECTED");
+      }
+    };
+
+    tryAutoReconnect();
   }, []);
 
   // Vault State: Default to the verified Genesis Vault on MST Mainnet (Chain ID 4646)
@@ -628,9 +669,12 @@ export const App: React.FC = () => {
         setNetworkName(chainId === MST_MAINNET_CONFIG.chainId ? "MST Mainnet (4646)" : "MST Testnet (91562037)");
         setStatusMessage("Wallet Connected Successfully!");
 
-        const targetVault = chainId === MST_MAINNET_CONFIG.chainId
+        const defaultVault = chainId === MST_MAINNET_CONFIG.chainId
           ? "0x9a81aED1b3D2d4c85A0ea8FC6129D17b2fFed339"
           : "0x8442bF7dE2d0FF9aF4136a83Cf20BE559b6Fb5C9";
+        const savedVault = localStorage.getItem("clubvault_last_vault");
+        const targetVault = savedVault || defaultVault;
+        try { localStorage.setItem("clubvault_last_vault", targetVault); } catch {}
         setVaultAddress(targetVault);
         syncOnChainVault(targetVault);
       } else {
@@ -2642,6 +2686,7 @@ export const App: React.FC = () => {
                     id="btn-select-mainnet-vault"
                     onClick={() => {
                       const mainnetVault = "0x9a81aED1b3D2d4c85A0ea8FC6129D17b2fFed339";
+                      try { localStorage.setItem("clubvault_last_vault", mainnetVault); } catch {}
                       setVaultAddress(mainnetVault);
                       syncOnChainVault(mainnetVault);
                     }}
@@ -2664,6 +2709,7 @@ export const App: React.FC = () => {
                       id="btn-select-v2-vault"
                       onClick={() => {
                         const testnetV2 = "0x8442bF7dE2d0FF9aF4136a83Cf20BE559b6Fb5C9";
+                        try { localStorage.setItem("clubvault_last_vault", testnetV2); } catch {}
                         setVaultAddress(testnetV2);
                         syncOnChainVault(testnetV2);
                       }}
@@ -2684,6 +2730,7 @@ export const App: React.FC = () => {
                       id="btn-select-2of2-vault"
                       onClick={() => {
                         const test2of2 = "0x90e309A5246B37bBC79224A1449D25CC29ef88bE";
+                        try { localStorage.setItem("clubvault_last_vault", test2of2); } catch {}
                         setVaultAddress(test2of2);
                         syncOnChainVault(test2of2);
                       }}
@@ -3887,7 +3934,7 @@ export const App: React.FC = () => {
                 <input
                   id="prop-amount-input"
                   type="number"
-                  step="0.01"
+                  step="any"
                   max={availableFunds}
                   className="form-control"
                   placeholder="e.g. 1.5"
