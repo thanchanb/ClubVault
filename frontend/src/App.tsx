@@ -1154,15 +1154,23 @@ export const App: React.FC = () => {
   const handleCreateProposal = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!formRecipient || !formAmount || !formDescription) {
-      alert("Please fill all required fields.");
+      setTxStage("error");
+      setTxStageMessage("Please fill all required proposal fields.");
       return;
     }
 
     const requestedAmount = parseFloat(formAmount);
-    const available = parseFloat(availableFunds);
+    const available = parseFloat(availableFunds || "0");
+
+    if (available <= 0) {
+      setTxStage("error");
+      setTxStageMessage(`Vault treasury has 0 ${currencySymbol} available. Please deposit funds into the vault before creating a payout proposal.`);
+      return;
+    }
 
     if (requestedAmount > available) {
-      alert(`Cannot create proposal: Requested amount (${requestedAmount}) exceeds Available Funds (${available} tMSTC).`);
+      setTxStage("error");
+      setTxStageMessage(`Cannot create proposal: Requested amount (${requestedAmount}) exceeds Available Funds (${available} ${currencySymbol}).`);
       return;
     }
 
@@ -4015,20 +4023,57 @@ export const App: React.FC = () => {
               </div>
 
               <div className="form-group">
-                <label className="form-label">
-                  Amount (tMSTC) — Available: <strong>{availableFunds} tMSTC</strong>
-                </label>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "0.4rem" }}>
+                  <label className="form-label" style={{ marginBottom: 0 }}>
+                    Amount ({currencySymbol})
+                  </label>
+                  <span
+                    style={{
+                      fontSize: "0.8rem",
+                      fontWeight: 600,
+                      color: parseFloat(availableFunds || "0") > 0 ? "var(--accent-emerald)" : "var(--accent-crimson)",
+                    }}
+                  >
+                    Treasury Available: {availableFunds} {currencySymbol}
+                  </span>
+                </div>
                 <input
                   id="prop-amount-input"
                   type="number"
                   step="any"
-                  max={availableFunds}
+                  min="0.0001"
                   className="form-control"
-                  placeholder="e.g. 1.5"
+                  placeholder={
+                    parseFloat(availableFunds || "0") > 0
+                      ? `e.g. 0.01 (Available: ${availableFunds} ${currencySymbol})`
+                      : "Vault is empty — deposit funds first"
+                  }
                   value={formAmount}
                   onChange={(e) => setFormAmount(e.target.value)}
                   required
                 />
+                {Boolean(formAmount) && parseFloat(formAmount) > parseFloat(availableFunds || "0") && (
+                  <div style={{ color: "var(--accent-crimson)", fontSize: "0.78rem", marginTop: "4px", display: "flex", alignItems: "center", gap: "0.3rem" }}>
+                    <AlertTriangle style={{ width: "13px", height: "13px" }} />
+                    <span>Requested amount exceeds vault available funds ({availableFunds} {currencySymbol})</span>
+                  </div>
+                )}
+                {parseFloat(availableFunds || "0") <= 0 && (
+                  <div
+                    style={{
+                      marginTop: "8px",
+                      padding: "0.6rem 0.8rem",
+                      borderRadius: "6px",
+                      background: "rgba(245, 158, 11, 0.12)",
+                      border: "1px solid rgba(245, 158, 11, 0.3)",
+                      color: "var(--accent-amber)",
+                      fontSize: "0.78rem",
+                      lineHeight: "1.35",
+                    }}
+                  >
+                    ⚠️ <strong>Vault treasury currently has 0 available funds.</strong> ClubVault proposals disburse funds from this treasury. Please deposit funds using the "Deposit & Fund" tab or switch to a funded vault.
+                  </div>
+                )}
               </div>
 
               {formPropType === ProposalType.ADVANCE_PAYMENT && (
@@ -4066,8 +4111,16 @@ export const App: React.FC = () => {
                 <button type="button" className="btn btn-secondary" onClick={() => setShowCreateModal(false)}>
                   Cancel
                 </button>
-                <button id="submit-proposal-btn" type="submit" className="btn btn-primary">
-                  Submit Proposal
+                <button
+                  id="submit-proposal-btn"
+                  type="submit"
+                  className="btn btn-primary"
+                  disabled={
+                    parseFloat(availableFunds || "0") <= 0 ||
+                    (Boolean(formAmount) && parseFloat(formAmount) > parseFloat(availableFunds || "0"))
+                  }
+                >
+                  {parseFloat(availableFunds || "0") <= 0 ? "Cannot Submit (Vault Empty)" : "Submit Proposal"}
                 </button>
               </div>
             </form>
