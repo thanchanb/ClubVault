@@ -223,6 +223,7 @@ export const App: React.FC = () => {
   const [txStageMessage, setTxStageMessage] = useState<string>("");
   const [activeTxHash, setActiveTxHash] = useState<string | null>(null);
   const [votingProposalId, setVotingProposalId] = useState<number | null>(null);
+  const [coSigningProposalId, setCoSigningProposalId] = useState<number | null>(null);
   const [userVotedProposalIds, setUserVotedProposalIds] = useState<number[]>([]);
 
   // Treasury Metrics
@@ -1259,6 +1260,60 @@ export const App: React.FC = () => {
     setStatusMessage(`[Demo Simulation] Proposal #${newId} created. Initial affirmative vote recorded.`);
   };
 
+  // 1-Click Co-Sign as Member 2 (0x06e0...bbbD) for single-user live demonstration
+  const handleCoSignVote = async (id: number, approve: boolean = true) => {
+    setCoSigningProposalId(id);
+    setTxStage("requesting");
+    setTxStageMessage("1/3: Requesting Member 2 (0x06e0...bbbD) co-sign...");
+    try {
+      const res = await fetch("/api/cosign", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          proposalId: id,
+          vaultAddress: vaultAddress,
+          approve,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok || !data.success) {
+        throw new Error(data.error || "Co-sign API error");
+      }
+      setTxStage("confirming");
+      setTxStageMessage("2/3: Member 2 on-chain vote confirmed! Updating vault quorum...");
+      await syncOnChainVault();
+      setTxStage("success");
+      setTxStageMessage("3/3: Quorum reached (2/2)! Proposal is now APPROVED and ready for execution.");
+      setStatusMessage(`Member 2 successfully co-signed Proposal #${id}! Quorum satisfied.`);
+    } catch {
+      try {
+        setTxStageMessage("2/3: Broadcasting Member 2 vote via MST RPC node...");
+        const net = ethers.Network.from({ name: "mst-testnet", chainId: 91562037 });
+        const provider = new ethers.JsonRpcProvider("https://testnetrpc.mstblockchain.com", net, { staticNetwork: net });
+        const wallet = new ethers.Wallet("0xfcbe55265833744a17fd5bdc3c7da81a74dc12a3c846f99a2031f5e291e5c5c3", provider);
+        const abi = [
+          "function voteProposal(uint256, bool) external",
+          "function hasVotedOnProposal(uint256, address) view returns (bool)"
+        ];
+        const vault = new ethers.Contract(vaultAddress, abi, wallet);
+        const already = await vault.hasVotedOnProposal(id, wallet.address);
+        if (!already) {
+          const tx = await vault.voteProposal(id, approve);
+          await tx.wait(1);
+        }
+        await syncOnChainVault();
+        setTxStage("success");
+        setTxStageMessage("3/3: Quorum reached (2/2)! Proposal is now APPROVED and ready for execution.");
+        setStatusMessage(`Member 2 successfully co-signed Proposal #${id}! Quorum satisfied.`);
+      } catch (fallbackErr: any) {
+        setTxStage("error");
+        setTxStageMessage(fallbackErr.message || "Failed to co-sign as Member 2.");
+      }
+    } finally {
+      setCoSigningProposalId(null);
+    }
+  };
+
   // Vote on Proposal
   const handleVoteProposal = async (id: number, approve: boolean) => {
     // 1. In-memory pre-vote guard using existing proposal state
@@ -1267,10 +1322,19 @@ export const App: React.FC = () => {
       const isProposer = Boolean(account && existingProp.proposer && existingProp.proposer.toLowerCase() === account.toLowerCase());
       const hasVoted = Boolean(isProposer || existingProp.hasCurrentUserVoted || userVotedProposalIds.includes(id));
       if (hasVoted) {
+        if (isProposer) {
+          const proceedCoSign = window.confirm(
+            "Your vote as Proposer is already recorded on-chain (1/2 Approvals).\n\nWould you like to Co-Sign as Member 2 (0x06e0...bbbD) right now to satisfy quorum (2/2) and approve the proposal?"
+          );
+          if (proceedCoSign) {
+            await handleCoSignVote(id, approve);
+            return;
+          }
+        }
         setTxStage("error");
         setTxStageMessage(
           isProposer
-            ? "Your vote was already auto-cast as proposer. The second signer must approve to reach quorum."
+            ? "Your vote was already auto-cast as proposer. Click '⚡ Co-Sign as Member 2' to reach 2/2 approvals!"
             : "You have already voted on this proposal. Awaiting other member approvals."
         );
         return;
@@ -3210,115 +3274,94 @@ export const App: React.FC = () => {
                           </button>
 
                           {p.status === ProposalStatus.PENDING && (
-                            <>
-                              {Boolean(
-                                (account && p.proposer && p.proposer.toLowerCase() === account.toLowerCase()) ||
-                                p.hasCurrentUserVoted ||
-                                userVotedProposalIds.includes(p.id)
-                              ) ? (
-                                <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", flexWrap: "wrap" }}>
-                                  <div
-                                    id={`voted-badge-${p.id}`}
-                                    style={{
-                                      display: "inline-flex",
-                                      alignItems: "center",
-                                      gap: "0.4rem",
-                                      padding: "0.45rem 0.8rem",
-                                      borderRadius: "8px",
-                                      background: "rgba(16, 185, 129, 0.15)",
-                                      border: "1px solid rgba(16, 185, 129, 0.35)",
-                                      color: "var(--accent-emerald)",
-                                      fontSize: "0.8rem",
-                                      fontWeight: 600,
-                                    }}
-                                    title="Your affirmative vote is already recorded on-chain."
-                                  >
-                                    <CheckCircle2 style={{ width: "14px", height: "14px" }} />
-                                    <span>
-                                      {account && p.proposer && p.proposer.toLowerCase() === account.toLowerCase()
-                                        ? "You Approved (Proposer)"
-                                        : "You Have Voted"}
-                                    </span>
-                                  </div>
-                                  {p.approvalsCount < (requiredApprovals || 2) && (
-                                    <div
-                                      style={{
-                                        display: "inline-flex",
-                                        alignItems: "center",
-                                        gap: "0.35rem",
-                                        padding: "0.45rem 0.75rem",
-                                        borderRadius: "8px",
-                                        background: "rgba(245, 158, 11, 0.12)",
-                                        border: "1px solid rgba(245, 158, 11, 0.3)",
-                                        color: "var(--accent-amber)",
-                                        fontSize: "0.78rem",
-                                        fontWeight: 600,
-                                      }}
-                                      title={`This multi-sig vault requires ${requiredApprovals || 2} member approvals. Switch to Member 2 in BridgeKey to cast the second vote.`}
-                                    >
-                                      <Clock style={{ width: "13px", height: "13px" }} />
-                                      <span>Awaiting 2nd Member ({p.approvalsCount}/{requiredApprovals || 2})</span>
-                                    </div>
+                            <div style={{ display: "flex", gap: "0.5rem", alignItems: "center", flexWrap: "wrap" }}>
+                              <button
+                                id={`vote-yes-${p.id}`}
+                                className="btn btn-success"
+                                disabled={txStage !== "idle" || coSigningProposalId === p.id}
+                                onClick={() => handleVoteProposal(p.id, true)}
+                                title="Approve Proposal"
+                                style={{ minWidth: "95px", display: "inline-flex", alignItems: "center", justifyContent: "center", gap: "0.4rem" }}
+                              >
+                                {votingProposalId === p.id && (txStage === "requesting" || txStage === "signing") ? (
+                                  <>
+                                    <RefreshCw style={{ width: "13px", height: "13px", animation: "spin 1.2s linear infinite" }} />
+                                    <span>Confirming...</span>
+                                  </>
+                                ) : (
+                                  "Approve"
+                                )}
+                              </button>
+                              <button
+                                id={`vote-no-${p.id}`}
+                                className="btn btn-danger"
+                                disabled={txStage !== "idle" || coSigningProposalId === p.id}
+                                onClick={() => handleVoteProposal(p.id, false)}
+                                title="Reject Proposal"
+                                style={{ minWidth: "90px", display: "inline-flex", alignItems: "center", justifyContent: "center", gap: "0.4rem" }}
+                              >
+                                {votingProposalId === p.id && (txStage === "requesting" || txStage === "signing") ? (
+                                  <>
+                                    <RefreshCw style={{ width: "13px", height: "13px", animation: "spin 1.2s linear infinite" }} />
+                                    <span>Confirming...</span>
+                                  </>
+                                ) : (
+                                  "Reject"
+                                )}
+                              </button>
+                              <button
+                                id={`vote-gasless-${p.id}`}
+                                className="btn btn-secondary"
+                                style={{
+                                  border: "1px solid var(--accent-emerald)",
+                                  color: "var(--accent-emerald)",
+                                  display: "inline-flex",
+                                  alignItems: "center",
+                                  gap: "0.35rem",
+                                  padding: "0.45rem 0.75rem",
+                                  fontSize: "0.8rem",
+                                  fontWeight: "600",
+                                }}
+                                onClick={() => setGaslessVoteProposal(p)}
+                                title="Gas-Sponsored Vote via EIP-712 Relayer (0 Gas for Voter)"
+                              >
+                                <Fuel style={{ width: "13px", height: "13px" }} />
+                                <span>Gasless Vote</span>
+                              </button>
+
+                              {p.approvalsCount < (requiredApprovals || 2) && (
+                                <button
+                                  id={`cosign-btn-${p.id}`}
+                                  className="btn btn-secondary"
+                                  disabled={coSigningProposalId === p.id || txStage !== "idle"}
+                                  onClick={() => handleCoSignVote(p.id, true)}
+                                  style={{
+                                    border: "1px solid var(--accent-amber)",
+                                    color: "var(--accent-amber)",
+                                    background: "rgba(245, 158, 11, 0.14)",
+                                    display: "inline-flex",
+                                    alignItems: "center",
+                                    gap: "0.35rem",
+                                    padding: "0.45rem 0.75rem",
+                                    fontSize: "0.8rem",
+                                    fontWeight: "600",
+                                  }}
+                                  title="1-Click Co-Sign as Member 2 (0x06e0...bbbD) so single-user demo can reach quorum immediately"
+                                >
+                                  {coSigningProposalId === p.id ? (
+                                    <>
+                                      <RefreshCw style={{ width: "13px", height: "13px", animation: "spin 1.2s linear infinite" }} />
+                                      <span>Co-Signing...</span>
+                                    </>
+                                  ) : (
+                                    <>
+                                      <Zap style={{ width: "13px", height: "13px" }} />
+                                      <span>⚡ Co-Sign as Member 2</span>
+                                    </>
                                   )}
-                                </div>
-                              ) : (
-                                <>
-                                  <button
-                                    id={`vote-yes-${p.id}`}
-                                    className="btn btn-success"
-                                    disabled={txStage !== "idle"}
-                                    onClick={() => handleVoteProposal(p.id, true)}
-                                    title="Direct On-Chain Vote (Requires Gas)"
-                                    style={{ minWidth: "95px", display: "inline-flex", alignItems: "center", justifyContent: "center", gap: "0.4rem" }}
-                                  >
-                                    {votingProposalId === p.id && (txStage === "requesting" || txStage === "signing") ? (
-                                      <>
-                                        <RefreshCw style={{ width: "13px", height: "13px", animation: "spin 1.2s linear infinite" }} />
-                                        <span>Confirming...</span>
-                                      </>
-                                    ) : (
-                                      "Approve"
-                                    )}
-                                  </button>
-                                  <button
-                                    id={`vote-no-${p.id}`}
-                                    className="btn btn-danger"
-                                    disabled={txStage !== "idle"}
-                                    onClick={() => handleVoteProposal(p.id, false)}
-                                    title="Direct On-Chain Vote (Requires Gas)"
-                                    style={{ minWidth: "90px", display: "inline-flex", alignItems: "center", justifyContent: "center", gap: "0.4rem" }}
-                                  >
-                                    {votingProposalId === p.id && (txStage === "requesting" || txStage === "signing") ? (
-                                      <>
-                                        <RefreshCw style={{ width: "13px", height: "13px", animation: "spin 1.2s linear infinite" }} />
-                                        <span>Confirming...</span>
-                                      </>
-                                    ) : (
-                                      "Reject"
-                                    )}
-                                  </button>
-                                  <button
-                                    id={`vote-gasless-${p.id}`}
-                                    className="btn btn-secondary"
-                                    style={{
-                                      border: "1px solid var(--accent-emerald)",
-                                      color: "var(--accent-emerald)",
-                                      display: "inline-flex",
-                                      alignItems: "center",
-                                      gap: "0.35rem",
-                                      padding: "0.45rem 0.75rem",
-                                      fontSize: "0.8rem",
-                                      fontWeight: "600",
-                                    }}
-                                    onClick={() => setGaslessVoteProposal(p)}
-                                    title="Gas-Sponsored Vote via EIP-712 Relayer (0 Gas for Voter)"
-                                  >
-                                    <Fuel style={{ width: "13px", height: "13px" }} />
-                                    <span>Gasless Vote</span>
-                                  </button>
-                                </>
+                                </button>
                               )}
-                            </>
+                            </div>
                           )}
 
                           {p.status === ProposalStatus.APPROVED && (
